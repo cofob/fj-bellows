@@ -394,10 +394,61 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 	}
 	l.applyManagedResourceAttachments(&opts)
 	inst, err := l.client.CreateInstance(ctx, opts)
+	if err != nil && l.shouldRetryWithoutPlacementGroup(err) {
+		// FJB-11: with enforcement=flexible the operator's intent is
+		// "best-effort PG, don't block on it". Linode's API treats
+		// PG-full as a hard 400 anyway, so we honor flexible at the
+		// orchestrator level by dropping the PG attach for this one
+		// Linode and retrying. The PG fills back up at its own pace;
+		// this single worker just doesn't get the anti-affinity slot.
+		slog.Default().Warn(
+			"placement group at capacity; provisioning this worker without PG attach (enforcement: flexible)",
+			"tag", spec.Tag, "label", spec.Name,
+		)
+		opts.PlacementGroup = nil
+		inst, err = l.client.CreateInstance(ctx, opts)
+	}
 	if err != nil {
 		return provider.Instance{}, fmt.Errorf("linode: create instance: %w", err)
 	}
 	return toInstance(*inst), nil
+}
+
+// shouldRetryWithoutPlacementGroup applies the FJB-11 flexible-
+// enforcement semantic: a PG-full error on a managed PG with
+// enforcement=flexible warrants one retry without the PG attach.
+// Strict enforcement bubbles the error (the operator explicitly
+// chose to prefer no-worker over no-anti-affinity). Operator-managed
+// PGs (placement_group_id) are left alone — fjb doesn't know the
+// operator's intent for that group.
+func (l *Linode) shouldRetryWithoutPlacementGroup(err error) bool {
+	if l.pg == nil {
+		return false
+	}
+	if l.pg.cfg.resolvedPolicy() != linodego.PlacementGroupPolicyFlexible {
+		return false
+	}
+	return isPlacementGroupFull(err)
+}
+
+// isPlacementGroupFull pattern-matches the Linode 400 surfaced when
+// the placement group has hit its per-region max_members ceiling.
+// We match on the human-readable substring rather than a structured
+// field because the Linode API doesn't expose a typed error code for
+// this case as of writing. linodego.Error wraps it; the bare-string
+// fallback covers cases where the error has already been wrapped
+// into a generic error chain (errors.As also unwraps via
+// asLinodeError, so this is belt-and-suspenders).
+func isPlacementGroupFull(err error) bool {
+	if err == nil {
+		return false
+	}
+	const marker = "Placement Group is at its full capacity"
+	var le *linodego.Error
+	if asLinodeError(err, &le) {
+		return le.Code == 400 && strings.Contains(le.Message, marker)
+	}
+	return strings.Contains(err.Error(), marker)
 }
 
 // applyManagedResourceAttachments stamps the firewall + placement
@@ -468,6 +519,25 @@ func (l *Linode) ensureManagedResources(ctx context.Context) error {
 // removed once no devices/members remain attached). -destroy-on-exit
 // naturally flows through here per instance, so we get cleanup for free
 // without a Provider.Shutdown hook.
+//
+// FJB-12: the managed cache VM is intentionally NOT reaped here.
+// Worker count goes to zero on idle teardown but the operator's
+// intent — declared by setting `cache:` in config — is for the cache
+// to outlive the worker fleet. Reaping it on every idle-to-empty
+// transition (a) burned 3-5 min of cache boot on the next job after
+// any idle period and (b) created the FJB-12 deadlock window where
+// Provision needed the cache VPC IP from a VM that had just been
+// reaped. With the cache kept warm, neither happens. Bucket + scoped
+// key stay alive alongside it (they're owned by `maybeCleanupCache`
+// and only get reaped when it does). The cache VM is still
+// re-createable on demand via cache.ensure() (FJB-10), so it self-
+// heals if it vanishes for any other reason (Linode incident, manual
+// delete). Operators wanting an explicit teardown delete it via the
+// Linode console; a future fjb flag could automate that if it
+// becomes a common operation. Firewall and VPC reapers still fire
+// correctly even though the cache VM remains: both gate on "no
+// devices/linodes attached", and the cache VM keeps them in use, so
+// they stay too.
 func (l *Linode) Destroy(ctx context.Context, id string) error {
 	n, err := strconv.Atoi(id)
 	if err != nil {
@@ -475,14 +545,6 @@ func (l *Linode) Destroy(ctx context.Context, id string) error {
 	}
 	if err := l.client.DeleteInstance(ctx, n); err != nil {
 		return fmt.Errorf("linode: delete instance %d: %w", n, err)
-	}
-	// Cache first: it owns its own Linode + bucket + scoped key, all of
-	// which can be torn down without any dependency on the worker
-	// firewall / VPC reap below. Doing cache first also avoids a window
-	// where the cache VM is still attached to a VPC subnet we're about
-	// to delete.
-	if l.cache != nil {
-		l.cache.maybeCleanupCache(ctx)
 	}
 	if l.fw != nil {
 		l.fw.maybeCleanupFirewall(ctx)
