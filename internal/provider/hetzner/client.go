@@ -2,8 +2,14 @@ package hetzner
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrLocationUnavailable marks a server-create failure that may succeed in a
+// later configured location. Client implementations must only return it when
+// no server was created or when a partially created server was cleaned up.
+var ErrLocationUnavailable = errors.New("hetzner location unavailable")
 
 // Client is the narrow Hetzner Cloud API surface used by the provider. The
 // production implementation adapts hcloud-go; tests use the sibling mock

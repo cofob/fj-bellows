@@ -1,7 +1,8 @@
 # internal/forgejo
 
 A thin REST client for the Forgejo Actions runner API, scoped to one runner
-owner (`orgs/<org>` or `repos/<owner>/<name>`).
+owner (`admin` for the whole instance, `orgs/<org>`, or
+`repos/<owner>/<name>`).
 
 - `WaitingJobs` — `GET /api/v1/<scope>/actions/runners/jobs`; returns queued
   jobs with their required labels and per-attempt handle. Tolerates both a bare

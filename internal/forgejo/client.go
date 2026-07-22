@@ -27,9 +27,10 @@ type Client struct {
 }
 
 // New builds a client. scope is the API path segment that owns the runners,
-// e.g. "orgs/example" or "repos/owner/name". labels are the pool labels the
-// client filters the job queue by — the Forgejo /actions/runners/jobs endpoint
-// requires a non-empty labels query and returns null otherwise.
+// e.g. "admin" for an instance-wide runner, "orgs/example", or
+// "repos/owner/name". labels are the pool labels the client filters the job
+// queue by — the Forgejo /actions/runners/jobs endpoint requires a non-empty
+// labels query and returns null otherwise.
 func New(rawURL, scope, token string, labels ...string) *Client {
 	base := strings.TrimRight(rawURL, "/") + "/api/v1/" + strings.Trim(scope, "/")
 	return &Client{

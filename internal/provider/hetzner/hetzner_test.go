@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"maps"
 	"strings"
 	"sync"
@@ -20,6 +21,12 @@ import (
 const validConfig = `
 token: test-token
 location: test-location
+image: debian-13
+`
+
+const multiLocationConfig = `
+token: test-token
+locations: [fsn1, nue1, hel1]
 image: debian-13
 `
 
@@ -77,6 +84,9 @@ func TestConfigureValidationAndInfo(t *testing.T) {
 		{name: "token", cfg: "location: test\nimage: debian", want: "token"},
 		{name: "location", cfg: "token: test\nimage: debian", want: "location"},
 		{name: "image", cfg: "token: test\nlocation: fsn1", want: "image"},
+		{name: "both location forms", cfg: validConfig + "locations: [fsn1]\n", want: "mutually exclusive"},
+		{name: "empty location entry", cfg: "token: test\nlocations: [fsn1, ' ']\nimage: debian\n", want: "non-empty"},
+		{name: "duplicate location", cfg: "token: test\nlocations: [fsn1, fsn1]\nimage: debian\n", want: "duplicate"},
 		{name: "bad network", cfg: validConfig + "network_id: -1\n", want: "network_id"},
 		{name: "bad firewall", cfg: validConfig + "firewall_ids: [0]\n", want: "positive IDs"},
 		{name: "duplicate firewall", cfg: validConfig + "firewall_ids: [7, 7]\n", want: "duplicate"},
@@ -99,12 +109,20 @@ func TestConfigureValidationAndInfo(t *testing.T) {
 
 	h := configuredProvider(t, validConfig+"network_id: 12\nfirewall_ids: [21, 22]\n", &hmock.Client{})
 	info := h.Info(context.Background())
-	if info["location"] != "test-location" || info["image"] != "debian-13" ||
+	if info["location"] != "test-location" || info["locations"] != "test-location" || info["image"] != "debian-13" ||
 		info["network_id"] != "12" || info["firewall_ids"] != "21,22" || info[testTag] != "deployment-tag" {
 		t.Fatalf("Info = %#v", info)
 	}
 	if _, exists := info["token"]; exists {
 		t.Fatal("Info exposed provider token")
+	}
+}
+
+func TestConfigureMultipleLocationsPreservesOrder(t *testing.T) {
+	h := configuredProvider(t, multiLocationConfig, &hmock.Client{})
+	info := h.Info(context.Background())
+	if info["location"] != "fsn1" || info["locations"] != "fsn1,nue1,hel1" {
+		t.Fatalf("Info = %#v", info)
 	}
 }
 
@@ -140,6 +158,67 @@ func TestProvisionCreatesPublicServerWithCloudInitKey(t *testing.T) {
 	if inst.ID != "42" || inst.IPv4 != "203.0.113.42" || inst.VPCIPv4 != "10.0.0.42" ||
 		inst.Tag != "worker-tag" || !inst.CreatedAt.Equal(createdAt) {
 		t.Fatalf("instance = %#v", inst)
+	}
+}
+
+func TestProvisionFallsBackAcrossLocationsInOrder(t *testing.T) {
+	fake := &hmock.Client{CreateServerFn: func(_ context.Context, req hetzner.CreateServerRequest) (hetzner.Server, error) {
+		if req.Location == "fsn1" {
+			return hetzner.Server{}, errors.Join(hetzner.ErrLocationUnavailable, errors.New("capacity exhausted"))
+		}
+		return serverForRequest(42, req), nil
+	}}
+	h := configuredProvider(t, multiLocationConfig, fake)
+	inst, err := h.Provision(context.Background(), provider.Spec{
+		Tag: testTag, Name: testWorker, InstanceType: testInstanceType,
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if inst.ID != "42" {
+		t.Fatalf("instance = %#v", inst)
+	}
+	calls := fake.CreateServerCalls()
+	if len(calls) != 2 || calls[0].Location != "fsn1" || calls[1].Location != "nue1" {
+		t.Fatalf("create locations = %#v", calls)
+	}
+}
+
+func TestProvisionStopsLocationFallbackOnPermanentError(t *testing.T) {
+	want := errors.New("invalid token")
+	fake := &hmock.Client{CreateServerFn: func(context.Context, hetzner.CreateServerRequest) (hetzner.Server, error) {
+		return hetzner.Server{}, want
+	}}
+	h := configuredProvider(t, multiLocationConfig, fake)
+	_, err := h.Provision(context.Background(), provider.Spec{
+		Tag: testTag, Name: testWorker, InstanceType: testInstanceType,
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("Provision error = %v, want wraps %v", err, want)
+	}
+	if calls := fake.CreateServerCalls(); len(calls) != 1 || calls[0].Location != "fsn1" {
+		t.Fatalf("create locations = %#v", calls)
+	}
+}
+
+func TestProvisionReportsEveryUnavailableLocation(t *testing.T) {
+	fake := &hmock.Client{CreateServerFn: func(_ context.Context, req hetzner.CreateServerRequest) (hetzner.Server, error) {
+		return hetzner.Server{}, errors.Join(hetzner.ErrLocationUnavailable, fmt.Errorf("no capacity in %s", req.Location))
+	}}
+	h := configuredProvider(t, multiLocationConfig, fake)
+	_, err := h.Provision(context.Background(), provider.Spec{
+		Tag: testTag, Name: testWorker, InstanceType: testInstanceType,
+	})
+	if err == nil || !strings.Contains(err.Error(), "all configured locations unavailable") {
+		t.Fatalf("Provision error = %v", err)
+	}
+	for _, location := range []string{"fsn1", "nue1", "hel1"} {
+		if !strings.Contains(err.Error(), location) {
+			t.Fatalf("Provision error %q does not include %q", err, location)
+		}
+	}
+	if calls := fake.CreateServerCalls(); len(calls) != 3 {
+		t.Fatalf("create calls = %#v", calls)
 	}
 }
 
@@ -508,6 +587,27 @@ pricing_override:
 	}
 	if len(overrideFake.Calls()) != 0 {
 		t.Fatalf("complete override unexpectedly called catalog: %#v", overrideFake.Calls())
+	}
+}
+
+func TestQuoteUsesHighestRateAcrossFallbackLocations(t *testing.T) {
+	fake := &hmock.Client{GetPricingFn: func(context.Context) (hetzner.Catalog, error) {
+		return hetzner.Catalog{
+			Currency: "EUR", SnapshotGBMonth: "0.01",
+			ServerTypes: []hetzner.ServerTypePrice{
+				{InstanceType: testInstanceType, Location: "fsn1", PerHour: "0.010", PerMonth: "5.00"},
+				{InstanceType: testInstanceType, Location: "nue1", PerHour: "0.012", PerMonth: "6.00"},
+				{InstanceType: testInstanceType, Location: "hel1", PerHour: "0.011", PerMonth: "7.00"},
+			},
+		}, nil
+	}}
+	h := configuredProvider(t, multiLocationConfig, fake)
+	quote, err := h.Quote(context.Background(), testInstanceType)
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+	if quote.PerHourNanos != 12_000_000 || quote.PerMonthNanos != 7_000_000_000 {
+		t.Fatalf("quote = %#v", quote)
 	}
 }
 

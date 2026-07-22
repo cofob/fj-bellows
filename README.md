@@ -119,13 +119,21 @@ anchor and IP while giving the next job a fresh root filesystem.
 See [`config.example.yaml`](config.example.yaml). The schema is tiers-only:
 
 ```yaml
+forgejo:
+  url: https://forgejo.example.com
+  token: <forgejo-admin-token>
+  scope: admin # instance-wide; orgs/<org> and repos/<owner>/<repo> are narrower
+
 database:
   path: /var/lib/fj-bellows/fj-bellows.db
 
 providers:
   cloud-main:
     driver: hetzner
-    config: {token: <provider-token>, location: fsn1, image: debian-13}
+    config:
+      token: <provider-token>
+      locations: [fsn1, nue1, hel1] # tried in order
+      image: debian-13
 
 tiers:
   long:
@@ -136,20 +144,12 @@ tiers:
     reset_mode: snapshot
     warm_instances: 0
     max_instances: 10
-
-routing:
-  currency: USD
-  exchange_rates: {USD: "1", EUR: "1.08"}
-  routes:
-    amd64:
-      required_label: ci-auto-amd64
-      candidates: [short, long]
-      fallback_tier: short
-      history_window: 720h
-      min_samples: 10
-      cold_start_p95: 15m
-      max_optimization_wait_queue: 1
 ```
+
+Hetzner tries `locations` in order when capacity or placement is unavailable;
+the legacy scalar `location` remains supported for a single location. A bad
+token or permanent configuration error fails immediately instead of being
+retried across the list.
 
 With `warm_instances: 0`, the first matching job creates the snapshot and the
 same allocation serves that job, then stays reusable only through its current

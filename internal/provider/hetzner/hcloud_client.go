@@ -57,7 +57,7 @@ func (c *hcloudClient) CreateServer(ctx context.Context, req CreateServerRequest
 	}
 	result, _, err := c.client.Server.Create(ctx, opts)
 	if err != nil {
-		return Server{}, err
+		return Server{}, classifyCreateError(err)
 	}
 	if result.Server == nil {
 		return Server{}, errors.New("Hetzner API returned an empty server")
@@ -81,7 +81,37 @@ func (c *hcloudClient) cleanupCreateFailure(ctx context.Context, id int64, cause
 	if err := c.DeleteServer(cleanupCtx, id); err != nil {
 		return errors.Join(cause, fmt.Errorf("clean up server %d: %w", id, err))
 	}
-	return cause
+	return classifyCreateError(cause)
+}
+
+func classifyCreateError(err error) error {
+	if !isLocationUnavailable(err) {
+		return err
+	}
+	return errors.Join(ErrLocationUnavailable, err)
+}
+
+func isLocationUnavailable(err error) bool {
+	codes := []hcloud.ErrorCode{
+		hcloud.ErrorCodeResourceUnavailable,
+		hcloud.ErrorCodePlacementError,
+		hcloud.ErrorCodeMaintenance,
+		hcloud.ErrorCodeNoSubnetAvailable,
+		hcloud.ErrorCodeIPNotAvailable,
+	}
+	if hcloud.IsError(err, codes...) {
+		return true
+	}
+	var actionErr hcloud.ActionError
+	if !errors.As(err, &actionErr) {
+		return false
+	}
+	for _, code := range codes {
+		if actionErr.Code == string(code) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *hcloudClient) GetServer(ctx context.Context, id int64) (Server, error) {

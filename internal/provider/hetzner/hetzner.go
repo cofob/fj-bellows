@@ -24,6 +24,7 @@ const (
 type config struct {
 	Token           string           `yaml:"token"`
 	Location        string           `yaml:"location"`
+	Locations       []string         `yaml:"locations"`
 	Image           string           `yaml:"image"`
 	NetworkID       int64            `yaml:"network_id"`
 	FirewallIDs     []int64          `yaml:"firewall_ids"`
@@ -33,13 +34,34 @@ type config struct {
 func (c *config) normalizeAndValidate() error {
 	c.Token = strings.TrimSpace(c.Token)
 	c.Location = strings.TrimSpace(c.Location)
+	for i := range c.Locations {
+		c.Locations[i] = strings.TrimSpace(c.Locations[i])
+	}
 	c.Image = strings.TrimSpace(c.Image)
+	if c.Location != "" && len(c.Locations) != 0 {
+		return errors.New("hetzner: provider config: location and locations are mutually exclusive")
+	}
+	if c.Location != "" {
+		c.Locations = []string{c.Location}
+	} else if len(c.Locations) != 0 {
+		seenLocations := make(map[string]struct{}, len(c.Locations))
+		for _, location := range c.Locations {
+			if location == "" {
+				return errors.New("hetzner: provider config: locations must contain non-empty names")
+			}
+			if _, exists := seenLocations[location]; exists {
+				return fmt.Errorf("hetzner: provider config: duplicate locations entry %q", location)
+			}
+			seenLocations[location] = struct{}{}
+		}
+		c.Location = c.Locations[0]
+	}
 	var missing []string
 	if c.Token == "" {
 		missing = append(missing, "token")
 	}
-	if c.Location == "" {
-		missing = append(missing, "location")
+	if len(c.Locations) == 0 {
+		missing = append(missing, "location or locations")
 	}
 	if c.Image == "" {
 		missing = append(missing, "image")
@@ -158,11 +180,10 @@ func (h *Hetzner) Provision(ctx context.Context, spec provider.Spec) (provider.I
 		return provider.Instance{}, err
 	}
 
-	server, err := h.client.CreateServer(ctx, CreateServerRequest{
+	server, err := h.createServer(ctx, CreateServerRequest{
 		Name:         spec.Name,
 		InstanceType: spec.InstanceType,
 		Image:        imageRef,
-		Location:     h.cfg.Location,
 		UserData:     userData,
 		Labels:       labels,
 		NetworkID:    h.cfg.NetworkID,
@@ -180,6 +201,22 @@ func (h *Hetzner) Provision(ctx context.Context, spec provider.Spec) (provider.I
 			fmt.Errorf("hetzner: created server %d has no public IPv4", server.ID))
 	}
 	return inst, nil
+}
+
+func (h *Hetzner) createServer(ctx context.Context, req CreateServerRequest) (Server, error) {
+	locationErrors := make([]error, 0, len(h.cfg.Locations))
+	for _, location := range h.cfg.Locations {
+		req.Location = location
+		server, err := h.client.CreateServer(ctx, req)
+		if err == nil {
+			return server, nil
+		}
+		locationErrors = append(locationErrors, fmt.Errorf("location %s: %w", location, err))
+		if ctx.Err() != nil || !errors.Is(err, ErrLocationUnavailable) {
+			return Server{}, errors.Join(locationErrors...)
+		}
+	}
+	return Server{}, fmt.Errorf("all configured locations unavailable: %w", errors.Join(locationErrors...))
 }
 
 func validateProvisionSpec(spec provider.Spec) (string, error) {
@@ -529,6 +566,7 @@ func (h *Hetzner) Info(_ context.Context) map[string]string {
 	}
 	return map[string]string{
 		"location":     h.cfg.Location,
+		"locations":    strings.Join(h.cfg.Locations, ","),
 		"image":        h.cfg.Image,
 		"network_id":   strconv.FormatInt(h.cfg.NetworkID, 10),
 		"firewall_ids": strings.Join(firewallIDs, ","),

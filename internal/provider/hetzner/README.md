@@ -11,7 +11,7 @@ providers:
     driver: hetzner
     config:
       token: <hetzner-token>
-      location: fsn1
+      locations: [fsn1, nue1, hel1]
       image: debian-13
       # network_id: 123
       # firewall_ids: [456]
@@ -24,11 +24,18 @@ providers:
       #   snapshot_gb_month: "0.0119"
 ```
 
-The tier supplies `instance_type`; the provider configuration supplies the
-location and base image. Servers always receive public IPv4 and may also attach
-to one existing Network and existing Firewalls. The orchestrator SSH key is
-installed through multipart cloud-init, which also works during a server
-rebuild (the rebuild API has no SSH-key parameter).
+The tier supplies `instance_type`; the provider configuration supplies an
+ordered location list and base image. Provisioning tries locations in order and
+uses the first successful one. Only capacity, placement, maintenance, and
+location-network availability errors advance to the next location; permanent
+errors such as a bad token fail immediately. The legacy scalar `location` is
+still accepted, but it is mutually exclusive with `locations`. If `network_id`
+is set, that Network must be usable from every fallback location.
+
+Servers always receive public IPv4 and may also attach to one existing Network
+and existing Firewalls. The orchestrator SSH key is installed through
+multipart cloud-init, which also works during a server rebuild (the rebuild API
+has no SSH-key parameter).
 
 ## Ownership and snapshots
 
@@ -57,11 +64,15 @@ Volumes are outside this provider's managed snapshot lifecycle.
 
 ## Diagnostics and pricing
 
-`Info` exposes location, base image, attachment IDs, and tag, never the token.
-`Quote` reads Hetzner's location-specific net catalog prices and returns fixed-
-point nanounits for compute and snapshot storage. Optional decimal-string
-overrides take precedence. Currency mismatches are rejected when a partial
-override would otherwise mix amounts from two currencies.
+`Info` exposes the ordered locations, first location (for backward-compatible
+diagnostics), base image, attachment IDs, and tag, never the token. `Quote`
+reads Hetzner's location-specific net catalog prices and returns fixed-point
+nanounits for compute and snapshot storage. With multiple locations it requires
+a catalog entry for each one and conservatively uses the highest hourly and
+monthly rates, since the eventual fallback location is unknown while routing.
+Optional decimal-string overrides take precedence. Currency mismatches are
+rejected when a partial override would otherwise mix amounts from two
+currencies.
 
 The narrow `Client` interface isolates `hcloud-go` from provider behavior. Its
 sibling `mock` package is hand-written and concurrency-safe; all tests are

@@ -92,9 +92,11 @@ func (p *pricingOverride) normalizeAndValidate() error {
 	return nil
 }
 
-// Quote returns a fixed-point list-price observation for one server type at
-// the configured location. Overrides may replace either rate independently;
-// incomplete overrides are merged only when their currency matches catalog.
+// Quote returns a fixed-point list-price observation for one server type. For
+// multiple locations it conservatively uses the highest configured-location
+// rate because the actual fallback location is not known until provisioning.
+// Overrides may replace either rate independently; incomplete overrides are
+// merged only when their currency matches catalog.
 //
 //nolint:gocyclo // Quote explicitly merges independently optional fixed-point rates with catalog data.
 func (h *Hetzner) Quote(ctx context.Context, instanceType string) (provider.PriceQuote, error) {
@@ -134,24 +136,9 @@ func (h *Hetzner) Quote(ctx context.Context, instanceType string) (provider.Pric
 		if overrideCurrency != "" && overrideCurrency != currency && (hasOverride || hasSnapshotOverride) {
 			return provider.PriceQuote{}, fmt.Errorf("hetzner: cannot merge %s pricing override with %s catalog", overrideCurrency, currency)
 		}
-		var found bool
-		for _, price := range catalog.ServerTypes {
-			if price.InstanceType != instanceType || price.Location != h.cfg.Location {
-				continue
-			}
-			perHour, err = parseDecimalNanos(price.PerHour)
-			if err != nil {
-				return provider.PriceQuote{}, fmt.Errorf("hetzner: catalog %s/%s hourly price: %w", instanceType, h.cfg.Location, err)
-			}
-			perMonth, err = parseDecimalNanos(price.PerMonth)
-			if err != nil {
-				return provider.PriceQuote{}, fmt.Errorf("hetzner: catalog %s/%s monthly price: %w", instanceType, h.cfg.Location, err)
-			}
-			found = true
-			break
-		}
-		if !found {
-			return provider.PriceQuote{}, fmt.Errorf("hetzner: server type %q has no catalog price in location %q", instanceType, h.cfg.Location)
+		perHour, perMonth, err = catalogRates(catalog, instanceType, h.cfg.Locations)
+		if err != nil {
+			return provider.PriceQuote{}, err
 		}
 		snapshot, err = parseDecimalNanos(catalog.SnapshotGBMonth)
 		if err != nil {
@@ -196,6 +183,33 @@ func (h *Hetzner) Quote(ctx context.Context, instanceType string) (provider.Pric
 		Source:               source,
 		ObservedAt:           now().UTC(),
 	}, nil
+}
+
+func catalogRates(catalog Catalog, instanceType string, locations []string) (int64, int64, error) {
+	prices := make(map[string]ServerTypePrice, len(locations))
+	for _, price := range catalog.ServerTypes {
+		if price.InstanceType == instanceType {
+			prices[price.Location] = price
+		}
+	}
+	var maxHour, maxMonth int64
+	for _, location := range locations {
+		price, found := prices[location]
+		if !found {
+			return 0, 0, fmt.Errorf("hetzner: server type %q has no catalog price in location %q", instanceType, location)
+		}
+		perHour, err := parseDecimalNanos(price.PerHour)
+		if err != nil {
+			return 0, 0, fmt.Errorf("hetzner: catalog %s/%s hourly price: %w", instanceType, location, err)
+		}
+		perMonth, err := parseDecimalNanos(price.PerMonth)
+		if err != nil {
+			return 0, 0, fmt.Errorf("hetzner: catalog %s/%s monthly price: %w", instanceType, location, err)
+		}
+		maxHour = max(maxHour, perHour)
+		maxMonth = max(maxMonth, perMonth)
+	}
+	return maxHour, maxMonth, nil
 }
 
 func validCurrency(currency string) bool {

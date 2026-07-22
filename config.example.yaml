@@ -7,8 +7,9 @@
 forgejo:
   url: https://forgejo.example.com
   token: <forgejo-admin-token>
-  # Runner owner: "orgs/<org>" or "repos/<owner>/<repository>".
-  scope: orgs/example
+  # Instance-wide runner owner. Use "orgs/<org>" or
+  # "repos/<owner>/<repository>" to restrict the fleet instead.
+  scope: admin
 
 # Durable recovery, job history, timings, and cost/statistics ledger. The
 # parent directory must already exist and must be on a persistent local
@@ -24,21 +25,13 @@ tag: fj-bellows
 # Named provider instances. `config` remains opaque to the core and is decoded
 # only by the selected driver. One provider instance may serve several tiers.
 providers:
-  digitalocean:
-    driver: digitalocean
-    config:
-      token: <digitalocean-token>
-      region: nyc3
-      image: debian-13-x64
-      # vpc_uuid: <existing-vpc-uuid>
-      # ssh_key_ids: [12345]
-      # firewall_id: <existing-firewall-uuid>
-
   hetzner:
     driver: hetzner
     config:
       token: <hetzner-token>
-      location: fsn1
+      # Tried in order. Capacity/placement failures fall through to the next
+      # location; authentication and invalid configuration errors fail fast.
+      locations: [fsn1, nue1, hel1]
       image: debian-13
       # network_id: 123
       # firewall_ids: [456]
@@ -47,22 +40,6 @@ providers:
 # tier. `labels` defaults to only required_label; list any additional labels or
 # runner image bindings the tier should advertise.
 tiers:
-  short:
-    required_label: ci-short-amd64
-    labels:
-      - ci-short-amd64
-      - 'ubuntu-latest:docker://catthehacker/ubuntu:act-latest'
-    provider: digitalocean
-    instance_type: s-4vcpu-8gb
-
-    # Strictly discard a worker after its job. DigitalOcean bills per second,
-    # so this cold tier neither prewarms nor retains idle capacity.
-    one_job_per_vm: true
-    reset_mode: none
-    warm_instances: 0
-    idle_timeout: 2m
-    max_instances: 10
-
   long:
     required_label: ci-long-amd64
     labels:
@@ -88,28 +65,6 @@ tiers:
     # instances are replenished across billing boundaries. Keep zero for
     # on-demand scale-to-zero with reuse only inside each paid window.
     # Set reset_mode: none to disable snapshot creation/reset entirely.
-
-# Optional fleet-level cost routing. Each route has a dedicated Forgejo queue
-# poll and persists its selected tier before that tier can act. Candidate tiers
-# automatically advertise the automatic label in addition to their explicit
-# required_label. A job carrying both labels follows the explicit tier label.
-routing:
-  currency: USD
-  exchange_rates:
-    USD: "1"
-    EUR: "1.08"
-
-  routes:
-    amd64:
-      required_label: ci-auto-amd64
-      candidates: [short, long]
-      fallback_tier: short
-      history_window: 720h
-      min_samples: 10
-      cold_start_p95: 15m
-      # Hold at most one job behind an already-paid hourly worker before
-      # allowing additional jobs to trigger cold capacity. Default: 0.
-      max_optimization_wait_queue: 1
 
 poll:
   interval: 10s
