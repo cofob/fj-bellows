@@ -16,12 +16,12 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
-# Vet + race + govulncheck on the build platform. Cached layer so an
-# unchanged source tree skips re-running the test suite.
+# Vet + race tests on the build platform. Both use only the Go toolchain and
+# committed module graph; network-backed scanners are intentionally not part
+# of the image-build gate.
 FROM --platform=$BUILDPLATFORM source AS test
 RUN go vet ./...
 RUN go test -race ./...
-RUN go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 # Cross-compile the production binary for the requested TARGETPLATFORM.
 FROM --platform=$BUILDPLATFORM source AS build

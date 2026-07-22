@@ -1,178 +1,127 @@
-# fj-bellows configuration (example).
+# fj-bellows tiers-only configuration example.
 #
-# Copy to config.yaml, fill in the two `<…>` secrets, and run. This file is
-# a working bootstrap; the deep reference for each block lives in the
-# package README it points at:
-#
-#   forgejo:        internal/forgejo/README.md
-#   orchestrator:   internal/orchestrator/README.md
-#   provider:linode internal/provider/linode/README.md
-#   provider:docker internal/provider/docker/README.md
-#
-# config.yaml holds secrets directly — keep it `chmod 600`. The SSH key is
-# referenced by path (not inlined).
+# Copy to config.yaml, replace the placeholder tokens, create the database
+# parent directory, and keep the file chmod 600. Provider tokens are inline;
+# SSH private keys are referenced by path.
 
 forgejo:
-  # Base URL of your Forgejo instance. Workers reach this URL through a
-  # reverse port-forward on the dispatch SSH session — a LAN-internal
-  # hostname works out of the box.
   url: https://forgejo.example.com
-
-  # Forgejo admin token (all scopes). Polls the job queue and mints per-job
-  # ephemeral runner registrations.
   token: <forgejo-admin-token>
-
-  # API path segment that owns the runners: "orgs/<org>" or "repos/<owner>/<name>".
+  # Runner owner: "orgs/<org>" or "repos/<owner>/<repository>".
   scope: orgs/example
 
-  # Runner labels this pool services. The `<name>:<scheme>://<image>` form
-  # binds a label to a job-container image; the orchestrator strips the
-  # binding for queue matching and passes the full form to one-job. The
-  # catthehacker image is the de-facto default for GH-Actions-style workflows.
-  labels:
-    - 'ubuntu-latest:docker://catthehacker/ubuntu:act-latest'
+# Durable recovery, job history, timings, and cost/statistics ledger. The
+# parent directory must already exist and must be on a persistent local
+# filesystem. Zero retention keeps completed history forever.
+database:
+  path: /var/lib/fj-bellows/fj-bellows.db
+  retention: 0s
 
-# Tag stamped on every instance this deployment owns. SET A UNIQUE TAG per
-# deployment if multiple fj-bellows run against the same cloud account, or
-# they will destroy each other's VMs. (The default "fj-bellows" warns at
-# startup.)
+# Every deployment sharing a cloud account needs a distinct ownership tag.
+# Each tier derives its cloud tag from this value and the tier name.
 tag: fj-bellows
 
-scale:
-  # Maximum number of warm worker VMs.
-  max: 1
+# Named provider instances. `config` remains opaque to the core and is decoded
+# only by the selected driver. One provider instance may serve several tiers.
+providers:
+  digitalocean:
+    driver: digitalocean
+    config:
+      token: <digitalocean-token>
+      region: nyc3
+      image: debian-13-x64
+      # vpc_uuid: <existing-vpc-uuid>
+      # ssh_key_ids: [12345]
+      # firewall_id: <existing-firewall-uuid>
 
-# Selected in-tree provider.
-provider: linode
+  hetzner:
+    driver: hetzner
+    config:
+      token: <hetzner-token>
+      location: fsn1
+      image: debian-13
+      # network_id: 123
+      # firewall_ids: [456]
 
-# Provider-specific config — decoded by the selected provider above.
-#
-# === Linode ===
-# Full reference: internal/provider/linode/README.md
-# PAT scope for the defaults below: Linodes: R/W + Firewalls: R/W +
-# Placement Groups: R/W.
-provider_config:
-  region: us-ord
-  type: g6-nanode-1
-  image: linode/debian13
-  token: <linode-pat>
+# Independent runner pools. `required_label` routes queued jobs to exactly one
+# tier. `labels` defaults to only required_label; list any additional labels or
+# runner image bindings the tier should advertise.
+tiers:
+  short:
+    required_label: ci-short-amd64
+    labels:
+      - ci-short-amd64
+      - 'ubuntu-latest:docker://catthehacker/ubuntu:act-latest'
+    provider: digitalocean
+    instance_type: s-4vcpu-8gb
 
-  # Managed Cloud Firewall: one per deployment, default-deny inbound except
-  # tcp/22 from the orchestrator's external IP (auto). Reaped on last
-  # Destroy. README covers sentinels (auto/any/any-v4/any-v6), policy
-  # overrides (inbound_policy / outbound_policy), and operator extra
-  # rules (extra_inbound / extra_outbound).
-  firewall:
-    allow_inbound:
-      - auto
-  # Alternative: attach to a pre-existing firewall (operator-managed).
-  # Mutually exclusive with `firewall:` above. Only needs Linodes: R/W.
-  # firewall_id: 123456
+    # Strictly discard a worker after its job. DigitalOcean bills per second,
+    # so this cold tier neither prewarms nor retains idle capacity.
+    one_job_per_vm: true
+    reset_mode: none
+    warm_instances: 0
+    idle_timeout: 2m
+    max_instances: 10
 
-  # Managed Placement Group (anti-affinity:local) — spreads workers across
-  # distinct hosts within `region`. Reaped on last Destroy. README covers
-  # the strict/flexible enforcement knob (flexible by default lets Linode
-  # fall back to colocation when the anti-affinity slot isn't available).
-  placement_group:
-    enforcement: flexible
-  # Alternative: attach to a pre-existing PG (operator-managed). Mutually
-  # exclusive with `placement_group:` above. Only needs Linodes: R/W.
-  # placement_group_id: 67890
+  long:
+    required_label: ci-long-amd64
+    labels:
+      - ci-long-amd64
+      - 'ubuntu-latest:docker://catthehacker/ubuntu:act-latest'
+    provider: hetzner
+    instance_type: cx33
 
-  # Managed VPC. Workers gain a VPC NIC on the worker subnet in addition to
-  # their public NIC. Useful by itself for worker-to-worker private comms;
-  # a future feature (pull-through cache, FJB-6) attaches the cache VM to a
-  # second subnet on this same VPC and binds its registry to the VPC IP.
-  # Reaped on last Destroy. Adds VPCs: R/W to the PAT scope.
-  # vpc:
-  #   # Subnet CIDRs must be RFC1918 (10/8, 172.16/12, 192.168/16); Linode
-  #   # rejects CGNAT and public ranges. CIDRs don't escape the VPC, so any
-  #   # vacant RFC1918 range is fine — pick one that doesn't overlap your
-  #   # LAN if you ever VPN/peer.
-  #   subnets:
-  #     cache:
-  #       ipv4: 10.0.0.0/24
-  #   # Optional: pick which subnet workers attach to. Defaults to the
-  #   # alphabetically-first key in subnets (so single-subnet configs need
-  #   # no override).
-  #   # worker_subnet: cache
+    # Hetzner bills whole hours rounded up. On first demand, a builder prepares
+    # one clean golden snapshot, is rebuilt from it as the first worker, and
+    # reuses that same paid allocation. After each job the server is rebuilt
+    # again, then held ready until just before the paid-hour boundary. Builders,
+    # workers, provisions, and resets all count toward max_instances.
+    one_job_per_vm: true
+    reset_mode: snapshot
+    reset_min_remaining: 10m
+    reset_timeout: 5m
+    warm_instances: 0
+    hour_margin: 5m
+    max_instances: 10
 
-  # Managed scratch registry (FJB-13). ABSENT = no cache. PRESENT =
-  # one zot VM + one Object Storage bucket per deployment, plus a
-  # multipart-MIME wrap on each worker's cloud-init that ships the
-  # fjb-managed CA + an /etc/hosts entry mapping cache.fjb.internal
-  # to the cache's VPC IP. Workers can then
-  #   docker push/pull cache.fjb.internal:5000/foo/bar:t
-  # for intermediate build artifacts that don't need to round-trip to
-  # the canonical registry. Pushes to the canonical registry
-  # (forgejo.url etc.) go direct from the worker — nothing intercepts
-  # them. Auto-synthesizes the `vpc:` block above if not declared.
-  # Adds `Object Storage: R/W` to the PAT scope and requires Object
-  # Storage to be enabled on the Linode account ($5/mo flat, one-
-  # click at Cloud Manager → Object Storage).
-  # cache:
-  #   # CA persistence path. Adopt-existing on daemon restart requires
-  #   # the CA dir to survive between restarts. Default under
-  #   # os.UserConfigDir(); set to a stable path when running fjb as a
-  #   # system service.
-  #   # tls:
-  #   #   ca_dir: /var/lib/fj-bellows/example/cache-ca
-  #   # type: g6-nanode-1          # bump to g6-standard-1 under burst
-  #   # image: linode/debian13
-  #   # zot_version: 2.1.7         # pinned; bump deliberately
+    # Set warm_instances > 0 for an always-ready proactive reserve; those
+    # instances are replenished across billing boundaries. Keep zero for
+    # on-demand scale-to-zero with reuse only inside each paid window.
+    # Set reset_mode: none to disable snapshot creation/reset entirely.
+
+# Optional fleet-level cost routing. Each route has a dedicated Forgejo queue
+# poll and persists its selected tier before that tier can act. Candidate tiers
+# automatically advertise the automatic label in addition to their explicit
+# required_label. A job carrying both labels follows the explicit tier label.
+routing:
+  currency: USD
+  exchange_rates:
+    USD: "1"
+    EUR: "1.08"
+
+  routes:
+    amd64:
+      required_label: ci-auto-amd64
+      candidates: [short, long]
+      fallback_tier: short
+      history_window: 720h
+      min_samples: 10
+      cold_start_p95: 15m
+      # Hold at most one job behind an already-paid hourly worker before
+      # allowing additional jobs to trigger cold capacity. Default: 0.
+      max_optimization_wait_queue: 1
 
 poll:
-  # How often to reconcile the queue against runners and instances.
   interval: 10s
-  # Hourly-rounding providers (Linode): kill an idle node this long before
-  # each paid-hour boundary (5m → the :55 rule).
-  hour_margin: 5m
-  # Per-second billing providers (Docker etc.): tear down an idle node
-  # after this long.
-  idle_timeout: 5m
-  # Cycle length for the kill mark; defaults to 1h matching every cloud's
-  # hourly rounding. Shorten for faster idle reclamation (e2e uses seconds).
-  # billing_hour: 1h
 
+# Shared SSH dispatcher configuration for cloud-backed tiers. The public half
+# is injected through cloud-init; the private key itself is never in YAML.
 ssh:
-  # The orchestrator dispatches one-job to workers over SSH using this key.
-  # Its public half is injected into each VM at provision time.
   private_key_file: /etc/fj-bellows/id_ed25519
   user: root
   port: 22
 
-# Transport mode for orchestrator ↔ worker dispatch.
-#
-#   "ssh" (default):    legacy SSH-on-public-IP. Each worker has a public
-#                       IPv4 with TCP/22 open to the orchestrator; the
-#                       dispatch session carries a reverse port-forward
-#                       to a LAN-only Forgejo.
-#
-#   "cache-gateway":    (FJB-54) cache nanode terminates an IPsec tunnel
-#                       from the LAN side and runs DNS + routing for the
-#                       worker VPC. Workers reach LAN services by name
-#                       through the cache; no public inbound on workers.
-#                       Set tunnel.routes + tunnel.lan_egress below.
-#
-# Leave this block out entirely to default to "ssh".
-#
-# transport:
-#   mode: cache-gateway
-#   tunnel:
-#     # LAN-side CIDRs reachable from workers via the IPsec tunnel.
-#     # Worker cloud-init adds an explicit route for each via the cache's
-#     # VPC IP. Everything not in the list takes the worker's default
-#     # gateway (provider NAT egress).
-#     routes:
-#       - 192.168.0.0/24
-#
-#     # Outbound allow-list — traffic permitted to emerge from the
-#     # tunnel onto the LAN. Enforced at two points (cache iptables and
-#     # LAN-side outbound firewall) from this single source. Anything not
-#     # listed is denied. `from: worker-vpc` resolves to the worker VPC
-#     # subnet via the active provider.
-#     lan_egress:
-#       - { from: worker-vpc, to: 192.168.0.2, port: 53,  proto: udp } # LAN DNS
-#       - { from: worker-vpc, to: 192.168.0.2, port: 53,  proto: tcp } # LAN DNS (TCP)
-#       - { from: worker-vpc, to: 192.168.0.7, port: 443, proto: tcp } # Forgejo
-#       - { from: worker-vpc, to: 192.168.0.7, port: 22,  proto: tcp } # git-over-ssh
+# `ssh` is the multi-cloud default. The Linode-only cache-gateway transport and
+# managed cache/VPC options remain documented in their package READMEs.
+transport:
+  mode: ssh

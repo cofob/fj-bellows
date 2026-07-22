@@ -15,8 +15,8 @@ permissions:
 
 jobs:
   # Single Docker build pipeline: runs the Dockerfile's `test` stage
-  # (go vet + go test -race + govulncheck on the source the runtime
-  # binary will be built from), then builds and pushes the multi-arch
+  # (go vet + go test -race on the source the runtime binary will be built
+  # from), then builds and pushes the multi-arch
   # runtime image to a run-scoped temp tag on ghcr.io. Both buildx
   # invocations share the `type=gha` cache, so the `source` stage is
   # built once and reused.
@@ -127,7 +127,11 @@ jobs:
       FORGEJO_ORG: bellowsorg
       FORGEJO_REPO: demo
       FORGEJO_LABEL: docker
-      FJBELLOWS_TAG: fjb-integ-${{ github.run_id }}
+      # Stable test tuple. FJBELLOWS_TAG is config.TierTag("local") for the
+      # deployment tag below; keeping it explicit lets assertions find the
+      # provider-safe ownership label without importing build tools.
+      FJBELLOWS_DEPLOYMENT_TAG: fjb-integ
+      FJBELLOWS_TAG: fjb-t-764134137d66c34287d482e1e27e5a5dad150db4
     steps:
       - uses: actions/checkout@v6
 
@@ -209,24 +213,27 @@ jobs:
             url: ${{ steps.forgejo.outputs.internal_url }}
             token: ${FORGEJO_TOKEN}
             scope: orgs/${FORGEJO_ORG}
-            labels:
-              - ${FORGEJO_LABEL}
-          tag: ${FJBELLOWS_TAG}
-          scale:
-            max: 1
-          provider: docker
-          provider_config:
-            image: fj-bellows-worker:test
-            network: ${{ steps.forgejo.outputs.network }}
-            # Bind-mount the host Docker socket so forgejo-runner inside the
-            # worker can spawn per-step containers on the host daemon (no
-            # nested Docker required).
-            volumes:
-              - /var/run/docker.sock:/var/run/docker.sock
+          database:
+            path: $RUNNER_TEMP/fj-bellows-e2e.db
+          tag: ${FJBELLOWS_DEPLOYMENT_TAG}
+          providers:
+            local:
+              driver: docker
+              config:
+                image: fj-bellows-worker:test
+                network: ${{ steps.forgejo.outputs.network }}
+                # Let forgejo-runner spawn per-step containers on the host.
+                volumes:
+                  - /var/run/docker.sock:/var/run/docker.sock
+          tiers:
+            local:
+              required_label: ${FORGEJO_LABEL}
+              provider: local
+              instance_type: local
+              max_instances: 1
+              idle_timeout: 5s
           poll:
             interval: 2s
-            idle_timeout: 5s
-            hour_margin: 5m
           YAML
           chmod 600 config.yaml
 
@@ -282,7 +289,7 @@ jobs:
             sleep 2
             kill -9 "$(cat fj-bellows.pid)" 2>/dev/null
           fi
-          # Remove any worker containers stamped with our run tag.
+          # Remove worker containers stamped with the E2E tier ownership tag.
           docker ps -a --filter "label=fj-bellows.tag=${FJBELLOWS_TAG}" -q | xargs -r docker rm -f
 
   # Gate the Linode E2E job on the LINODE_E2E_TOKEN secret existing. The
@@ -308,13 +315,9 @@ jobs:
     # may remain in the branch-protection required-checks list.
     # Cost per real run: ~1¢ (one paid hour on a g6-nanode-1).
     #
-    # Serialize: only one e2e-linode runs at a time across the whole repo,
-    # others queue. The pre-flight cleanup below prefix-matches every
-    # `fj-bellows-e2e-ci-*` tag, so two concurrent runs would race —
-    # whichever pre-flight fires second wipes the other's just-provisioned
-    # Linode mid-job (we hit exactly this when a v* tag push fires seconds
-    # after the merge-to-main push and the second run's pre-flight destroyed
-    # the first's Linode). cancel-in-progress: false queues rather than
+    # Serialize: the stable E2E tier ownership tag lets pre-flight cleanup
+    # reclaim an older leak exactly, but two concurrent runs would otherwise
+    # act on the same resources. cancel-in-progress: false queues rather than
     # killing the older run.
     concurrency:
       group: e2e-linode-${{ github.repository }}
@@ -344,6 +347,10 @@ jobs:
       FORGEJO_REPO: e2erepo
       FORGEJO_LABEL: linode-e2e
       FORGEJO_WORKFLOW_CONTAINER_OPTS: --network host
+      # Linode E2E is serialized, so a stable deployment/tier tuple permits
+      # exact pre-flight cleanup of resources leaked by an older run.
+      FJBELLOWS_DEPLOYMENT_TAG: fjb-e2e
+      TAG: fjb-t-e7b8f4b89433580213790a09105f57cbb8fce074
     steps:
       - uses: actions/checkout@v6
 
@@ -380,23 +387,23 @@ jobs:
           fi
           echo "name=$cid" >> "$GITHUB_OUTPUT"
 
-      - name: Pre-flight cleanup of leaked Linodes + firewalls (fj-bellows-e2e-ci-*)
+      - name: Pre-flight cleanup of leaked Linodes + firewalls
         run: |
           set -euo pipefail
           ids=$(curl -sS -H "Authorization: Bearer $LINODE_TOKEN" \
                   'https://api.linode.com/v4/linode/instances?page_size=200' \
-                | jq -r '.data[]? | select(.tags|any(startswith("fj-bellows-e2e-ci-"))) | .id')
+                | jq -r --arg t "$TAG" '.data[]? | select(.tags|index($t)) | .id')
           for id in $ids; do
             echo "destroying leaked Linode $id"
             curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $LINODE_TOKEN" \
               "https://api.linode.com/v4/linode/instances/$id"
           done
-          # Same prefix sweep for managed firewalls (#26). A firewall with
+          # Same exact ownership-tag sweep for managed firewalls (#26). A firewall with
           # devices still attached can't be deleted; the loop above removed
           # the devices first.
           fwids=$(curl -sS -H "Authorization: Bearer $LINODE_TOKEN" \
                     'https://api.linode.com/v4/networking/firewalls?page_size=200' \
-                  | jq -r '.data[]? | select(.tags|any(startswith("fj-bellows-e2e-ci-"))) | .id')
+                  | jq -r --arg t "$TAG" '.data[]? | select(.tags|index($t)) | .id')
           for id in $fwids; do
             echo "destroying leaked firewall $id"
             curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $LINODE_TOKEN" \
@@ -418,8 +425,6 @@ jobs:
           echo "FORGEJO_TOKEN=$token" >> "$GITHUB_ENV"
 
       - name: Write fj-bellows config
-        env:
-          TAG: fj-bellows-e2e-ci-${{ github.run_id }}
         run: |
           set -euo pipefail
           umask 077
@@ -428,45 +433,42 @@ jobs:
             url: http://localhost:3000
             token: ${FORGEJO_TOKEN}
             scope: orgs/${FORGEJO_ORG}
-            labels: [${FORGEJO_LABEL}]
-          tag: ${TAG}
-          scale:
-            max: 1
-          provider: linode
-          provider_config:
-            region: us-ord
-            type: g6-nanode-1
-            image: linode/debian13
-            token: ${LINODE_TOKEN}
-            # Managed firewall: SSH only from this CI runner's external IP.
-            # `auto` resolves to the GH-hosted runner's egress, which is the
-            # one address that needs to reach the worker for dispatch. The
-            # PAT `LINODE_E2E_TOKEN` needs `Firewalls: R/W` in addition to
-            # `Linodes: R/W`. See #26.
-            firewall:
-              allow_inbound:
-                - auto
+          database:
+            path: $RUNNER_TEMP/fj-bellows-e2e.db
+          tag: ${FJBELLOWS_DEPLOYMENT_TAG}
+          providers:
+            linode-e2e:
+              driver: linode
+              config:
+                region: us-ord
+                type: g6-nanode-1
+                image: linode/debian13
+                token: ${LINODE_TOKEN}
+                # Managed firewall: SSH only from this CI runner's egress.
+                firewall:
+                  allow_inbound:
+                    - auto
+          tiers:
+            linode-e2e:
+              required_label: ${FORGEJO_LABEL}
+              provider: linode-e2e
+              instance_type: g6-nanode-1
+              max_instances: 1
+              idle_timeout: 30s
+              # Short test-only billing cycle so teardown is observable.
+              billing_hour: 60s
+              hour_margin: 10s
           ssh:
             private_key_file: $RUNNER_TEMP/id_ed25519
             user: root
             port: 22
           poll:
             interval: 5s
-            idle_timeout: 30s
-            # Force a short billing cycle so idle teardown fires inside the
-            # CI budget. Linode still bills a whole hour on its side; we're
-            # just choosing to close earlier (sacrificing the
-            # fill-the-paid-hour benefit) so the E2E can actually observe a
-            # teardown. With billing_hour=60s + hour_margin=10s the kill
-            # mark is created+50s of every minute (then +1m50s, etc.).
-            billing_hour: 60s
-            hour_margin: 10s
           YAML
           chmod 600 config.yaml
           # Mask LINODE_TOKEN so even if a future step accidentally prints
           # the rendered config, the token does not leak via the run log.
           echo "::add-mask::${LINODE_TOKEN}"
-          echo "TAG=${TAG}" >> "$GITHUB_ENV"
 
       - name: Launch fj-bellows
         run: |
@@ -576,7 +578,7 @@ jobs:
           if [ -s fj-bellows.pid ]; then
             kill "$(cat fj-bellows.pid)" 2>/dev/null
           fi
-          # Destroy any Linode + managed firewall left carrying our run tag.
+          # Destroy any Linode + managed firewall left carrying the E2E tier tag.
           # Order matters: a firewall with devices still attached can't be
           # deleted, so destroy instances first, then the firewall.
           if [ -n "${LINODE_TOKEN:-}" ] && [ -n "${TAG:-}" ]; then

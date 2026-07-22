@@ -15,6 +15,9 @@ const (
 	StateIdle NodeState = "idle"
 	// StateBusy means a one-job run is in flight.
 	StateBusy NodeState = "busy"
+	// StateResetting means a completed one-job worker is being rebuilt from a
+	// managed clean image before it can return to the idle pool.
+	StateResetting NodeState = "resetting"
 	// StateDraining means the node is marked for teardown, DELETE not yet issued.
 	StateDraining NodeState = "draining"
 	// StateRemoving means Destroy was issued, awaiting disappearance from List.
@@ -23,8 +26,12 @@ const (
 
 // Node is the orchestrator's view of a worker VM.
 type Node struct {
-	InstanceID string
-	State      NodeState
+	InstanceID   string
+	ResourceID   int64
+	GenerationID int64
+	PriceQuoteID int64
+	PhaseID      int64
+	State        NodeState
 	// IP is the worker's public IPv4 (the legacy dial address under
 	// transport.mode=ssh). Empty for providers that dispatch by container
 	// exec, and may be empty under future private-only configurations.
@@ -114,6 +121,35 @@ func (p *Pool) SetJob(id, handle string) {
 	if n, ok := p.nodes[id]; ok {
 		n.CurrentJob = handle
 	}
+}
+
+// SetPhase updates the durable lifecycle phase associated with a node.
+func (p *Pool) SetPhase(id string, phaseID int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n, ok := p.nodes[id]; ok {
+		n.PhaseID = phaseID
+	}
+}
+
+// ResetReady atomically refreshes mutable instance addressing after an
+// in-place rebuild and returns the node to Idle while preserving CreatedAt.
+func (p *Pool) ResetReady(id, ip, vpcIP string, generationID int64, at time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n, ok := p.nodes[id]
+	if !ok {
+		return false
+	}
+	n.IP = ip
+	n.VPCIP = vpcIP
+	n.State = StateIdle
+	n.CurrentJob = ""
+	if generationID != 0 {
+		n.GenerationID = generationID
+	}
+	n.LastBusy = at
+	return true
 }
 
 // Snapshot returns copies of all nodes.

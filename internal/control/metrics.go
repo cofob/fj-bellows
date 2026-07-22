@@ -53,6 +53,37 @@ func newMetrics(backend Backend, now func() time.Time) *metrics {
 	}))
 
 	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "fjb_routing_healthy",
+		Help: "1 if automatic routing polls are healthy, or routing is disabled; 0 otherwise.",
+	}, func() float64 {
+		if backend.Health(context.Background()).RoutingHealthy {
+			return 1
+		}
+		return 0
+	}))
+
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "fjb_routing_last_poll_age_seconds",
+		Help: "Seconds since the automatic router's most recent poll; -1 if routing is disabled or has never polled.",
+	}, func() float64 {
+		s := backend.Health(context.Background())
+		if s.RoutingLastPollAt.IsZero() {
+			return -1
+		}
+		return now().Sub(s.RoutingLastPollAt).Seconds()
+	}))
+
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "fjb_routing_pricing_degraded",
+		Help: "1 if automatic routing is using persisted fallback prices; 0 otherwise.",
+	}, func() float64 {
+		if backend.Health(context.Background()).RoutingDegradedPricing {
+			return 1
+		}
+		return 0
+	}))
+
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "fjb_cache_present",
 		Help: "1 if the managed pull-through cache VM is provisioned; 0 otherwise.",
 	}, func() float64 {
@@ -147,7 +178,7 @@ func (c *workerCollector) Collect(ch chan<- prometheus.Metric) {
 // knownStates is the closed set of NodeState values the orchestrator emits.
 // Pre-seeding ensures every scrape shows the full label set rather than
 // disappearing labels between transitions.
-var knownStates = []string{"provisioning", "idle", "busy", "draining", "removing"}
+var knownStates = []string{"provisioning", "idle", "busy", "resetting", "draining", "removing"}
 
 // knownEventTypes is the closed set of event Type slugs the orchestrator
 // emits. Pre-seeding the counter at zero for each so the HELP/TYPE lines
@@ -162,7 +193,19 @@ var knownEventTypes = []string{
 	"worker_dropped",
 	"job_dispatched",
 	"job_complete",
+	"job_failed",
+	"worker_resetting",
+	"worker_reset",
+	"worker_reset_failed",
+	"worker_reset_skipped",
+	"worker_reap_failed",
+	"snapshot_build_started",
+	"snapshot_build_failed",
+	"snapshot_activated",
+	"snapshot_deleted",
 	"zombie_reaped",
 	"reconcile_tick",
+	"route_decided",
+	"route_deferred",
 	"stream_opened",
 }

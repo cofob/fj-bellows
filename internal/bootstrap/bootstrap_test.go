@@ -7,6 +7,27 @@ import (
 
 const testRunnerVersion = "1.0.0"
 
+func TestSnapshotContractMarkerTracksVersionAndEmbeddedInputs(t *testing.T) {
+	marker := SnapshotContractMarker()
+	if repeated := SnapshotContractMarker(); repeated != marker {
+		t.Fatalf("SnapshotContractMarker is not stable: %q then %q", marker, repeated)
+	}
+	if !strings.HasPrefix(marker, "bootstrap-sysprep-v1:") {
+		t.Fatalf("SnapshotContractMarker = %q, want embedded version prefix", marker)
+	}
+
+	base := snapshotContractMarker("v1", "cloud-init", "service")
+	for name, changed := range map[string]string{
+		"version":    snapshotContractMarker("v2", "cloud-init", "service"),
+		"cloud init": snapshotContractMarker("v1", "changed-cloud-init", "service"),
+		"service":    snapshotContractMarker("v1", "cloud-init", "changed-service"),
+	} {
+		if changed == base {
+			t.Errorf("%s change did not invalidate marker %q", name, base)
+		}
+	}
+}
+
 func TestRender(t *testing.T) {
 	out, err := Render(Params{RunnerVersion: "12.10.1"})
 	if err != nil {

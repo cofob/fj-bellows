@@ -5,6 +5,7 @@ package fjbellows.control.v1;
 option go_package = "github.com/hstern/fj-bellows/gen/fjbellows/control/v1;controlv1";
 
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
 
 // ControlService is the operator-facing control plane for a running fj-bellows
 // daemon. Mounted via ConnectRPC so the same handler speaks Connect/JSON
@@ -54,7 +55,8 @@ service ControlService {
   // StreamEvents emits state-transition events as they happen:
   // worker_provisioned, worker_ready, worker_busy, worker_idle,
   // worker_reaped, worker_adopted, worker_dropped, job_dispatched,
-  // job_complete, zombie_reaped, reconcile_tick. The stream stays open
+  // job_complete, zombie_reaped, reconcile_tick, route_decided, and
+  // route_deferred. The stream stays open
   // until the client disconnects or the daemon shuts down. Slow clients
   // are dropped (channel closed) rather than blocking the producer.
   //
@@ -81,10 +83,10 @@ service ControlService {
   rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
 
   // ReloadConfig re-reads config.yaml from disk and hot-swaps the
-  // hot-reloadable subset (poll intervals, scale.max, labels, drain
+  // hot-reloadable subset (poll interval, capacity/timers, and drain
   // settings). Returns CodeFailedPrecondition with a clear error if the
-  // new config changes provider, provider_config, forgejo.url/token, or
-  // tag — those require a daemon restart.
+  // new config changes provider routing/config, labels, Forgejo, database,
+  // or tag — those require a daemon restart.
   rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse);
 
   // ExecOnWorker runs a single shell command on the worker identified by
@@ -116,6 +118,13 @@ service ControlService {
   // `internal/provider/<name>/README.md`. Useful for capacity-full incidents
   // (FJB-11), account-state checks, and confirming managed-resource IDs.
   rpc ProviderInfo(ProviderInfoRequest) returns (ProviderInfoResponse);
+
+  // JobHistory reads durable, newest-first CI job history from SQLite.
+  rpc JobHistory(JobHistoryRequest) returns (JobHistoryResponse);
+
+  // Statistics aggregates durable job timing, outcomes, and fixed-point cost
+  // estimates without combining different currencies.
+  rpc Statistics(StatisticsRequest) returns (StatisticsResponse);
 }
 
 message HealthRequest {}
@@ -143,9 +152,21 @@ message HealthResponse {
   // freshness counters (last_tick_at, ...) only advance on a real reconcile;
   // the `paused` flag is the operator's signal that this is intentional.
   bool paused = 5;
+
+  bool database_healthy = 6;
+  google.protobuf.Timestamp database_last_successful_write_at = 7;
+  string database_last_error = 8;
+  bool routing_healthy = 9;
+  google.protobuf.Timestamp routing_last_poll_at = 10;
+  google.protobuf.Timestamp routing_last_decision_at = 11;
+  string routing_last_error = 12;
+  bool routing_degraded_pricing = 13;
 }
 
-message ListWorkersRequest {}
+message ListWorkersRequest {
+  string tier = 1;
+  string provider = 2;
+}
 
 message ListWorkersResponse {
   repeated Worker workers = 1;
@@ -159,7 +180,7 @@ message Worker {
   // ID, etc.). Unique within a deployment's tag scope.
   string instance_id = 1;
 
-  // state is one of: provisioning | idle | busy | draining | removing.
+  // state is one of: provisioning | idle | busy | resetting | draining | removing.
   string state = 2;
 
   // ip is the worker's public IPv4 address. Empty for providers that
@@ -200,9 +221,13 @@ message Worker {
   // billing_model is the provider's billing model string:
   // "per_second" or "hourly_round_up".
   string billing_model = 9;
+
+  string tier = 11;
+  string provider = 12;
+  string driver = 13;
 }
 
-message GetCacheRequest {}
+message GetCacheRequest { string provider = 1; }
 
 message GetCacheResponse {
   // present is true when a managed cache is configured AND its Linode ID is
@@ -256,6 +281,7 @@ message ForceReapRequest {
   // instance_id is the provider's identifier (Linode ID, docker container
   // ID, etc.) of the worker to destroy. Must be present in the pool.
   string instance_id = 1;
+  string tier = 2;
 }
 
 // ForceReapResponse is intentionally empty — failure surfaces via the
@@ -263,7 +289,7 @@ message ForceReapRequest {
 // node was dropped from the pool."
 message ForceReapResponse {}
 
-message ForceProvisionRequest {}
+message ForceProvisionRequest { string tier = 1; }
 
 message ForceProvisionResponse {
   // instance_id is the provider's identifier for the newly created
@@ -296,6 +322,7 @@ message ExecOnWorkerRequest {
   // on the worker. Capped at 64 KiB; longer requests are rejected with
   // CodeInvalidArgument.
   string command = 2;
+  string tier = 3;
 }
 
 message ExecOnWorkerResponse {
@@ -310,7 +337,8 @@ message ExecOnWorkerResponse {
 }
 
 message StreamEventsRequest {
-  // No filtering in v1; clients see every event.
+  string tier = 1;
+  string provider = 2;
 }
 
 message StreamEventsResponse {
@@ -364,7 +392,7 @@ message StreamLogsRequest {
   int32 history_lines = 3;
 }
 
-message ProviderInfoRequest {}
+message ProviderInfoRequest { string provider = 1; }
 
 message ProviderInfoResponse {
   // provider is the provider name slug ("linode", "docker", ...).
@@ -389,4 +417,159 @@ message StreamLogsResponse {
   // are flattened with dot-separated keys (`group.key`); non-string scalar
   // values use slog.Value.String().
   map<string, string> attrs = 4;
+}
+
+message JobHistoryRequest {
+  google.protobuf.Timestamp from = 1;
+  google.protobuf.Timestamp to = 2;
+  string tier = 3;
+  string provider = 4;
+  string repository = 5;
+  string workflow = 6;
+  string status = 7;
+  int32 limit = 8;
+  string cursor = 9;
+}
+
+message JobHistoryResponse {
+  repeated Job jobs = 1;
+  string next_cursor = 2;
+}
+
+message Job {
+  int64 id = 1;
+  string source = 2;
+  string handle = 3;
+  int64 forgejo_job_id = 4;
+  int64 attempt = 5;
+  int64 repository_id = 6;
+  string repository = 7;
+  string workflow = 8;
+  string workflow_file = 9;
+  string job_name = 10;
+  string identity_quality = 11;
+  string tier = 12;
+  string provider = 13;
+  string driver = 14;
+  string status = 15;
+  string conclusion = 16;
+  string infrastructure_failure = 17;
+  google.protobuf.Timestamp first_seen_at = 18;
+  google.protobuf.Timestamp queued_at = 19;
+  google.protobuf.Timestamp dispatched_at = 20;
+  google.protobuf.Timestamp runner_started_at = 21;
+  google.protobuf.Timestamp runner_finished_at = 22;
+  google.protobuf.Timestamp completed_at = 23;
+}
+
+message StatisticsRequest {
+  google.protobuf.Timestamp from = 1;
+  google.protobuf.Timestamp to = 2;
+  string tier = 3;
+  string provider = 4;
+  string repository = 5;
+  string workflow = 6;
+  // group_by is one of: none, workflow, tier, provider, day.
+  string group_by = 7;
+  string route = 8;
+}
+
+message StatisticsResponse {
+  repeated StatisticsGroup groups = 1;
+  repeated FleetCostTotal fleet_costs = 2;
+  repeated FleetTimingTotal fleet_timings = 3;
+  repeated RoutingEffectiveness routing_effectiveness = 4;
+}
+
+message StatisticsKey {
+  string source = 1;
+  int64 repository_id = 2;
+  string repository = 3;
+  string workflow = 4;
+  string tier = 5;
+  string provider = 6;
+  string day = 7;
+}
+
+message DurationSummary {
+  int64 count = 1;
+  google.protobuf.Duration total = 2;
+  google.protobuf.Duration min = 3;
+  google.protobuf.Duration max = 4;
+  google.protobuf.Duration p50 = 5;
+  google.protobuf.Duration p95 = 6;
+}
+
+message CostTotal {
+  string kind = 1;
+  string currency = 2;
+  int64 nanos = 3;
+  int64 entries = 4;
+  int64 unknown_entries = 5;
+  bool estimated = 6;
+}
+
+message StatisticsGroup {
+  StatisticsKey key = 1;
+  int64 jobs = 2;
+  int64 completed = 3;
+  int64 succeeded = 4;
+  int64 failed = 5;
+  int64 cancelled = 6;
+  int64 skipped = 7;
+  int64 infra_failed = 8;
+  int64 interrupted = 9;
+  int64 in_progress = 10;
+  int64 priced_jobs = 11;
+  int64 unpriced_jobs = 12;
+  DurationSummary queue_duration = 13;
+  DurationSummary dispatch_duration = 14;
+  DurationSummary run_duration = 15;
+  repeated CostTotal direct_costs = 16;
+}
+
+message FleetCostTotal {
+  string tier = 1;
+  string provider = 2;
+  string day = 3;
+  string kind = 4;
+  string currency = 5;
+  int64 nanos = 6;
+  int64 entries = 7;
+  int64 unknown_entries = 8;
+  bool estimated = 9;
+}
+
+message FleetTimingTotal {
+  string tier = 1;
+  string provider = 2;
+  string day = 3;
+  string kind = 4;
+  DurationSummary duration = 5;
+}
+
+message RoutingSelection {
+  string tier = 1;
+  string provider = 2;
+  int64 jobs = 3;
+}
+
+message RoutingEffectiveness {
+  string route = 1;
+  string required_label = 2;
+  string currency = 3;
+  int64 decisions = 4;
+  int64 completed = 5;
+  int64 fallback_decisions = 6;
+  int64 history_decisions = 7;
+  int64 idle_decisions = 8;
+  int64 deferred_decisions = 9;
+  int64 p95_hits = 10;
+  int64 p95_misses = 11;
+  int64 estimated_selected_nanos = 12;
+  int64 estimated_fallback_nanos = 13;
+  int64 estimated_savings_nanos = 14;
+  int64 actual_direct_nanos = 15;
+  int64 actual_unknown_entries = 16;
+  repeated RoutingSelection selections = 17;
 }

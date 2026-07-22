@@ -18,12 +18,14 @@ import (
 // The list is exported so the README and any future operator-facing surface
 // can render the authoritative set without drifting from the implementation.
 var HotReloadable = []string{
-	"scale.max",
-	"forgejo.labels",
+	"max_instances",
+	"warm_instances",
 	"poll.interval",
-	"poll.idle_timeout",
-	"poll.hour_margin",
-	"poll.billing_hour",
+	"idle_timeout",
+	"hour_margin",
+	"billing_hour",
+	"reset_min_remaining",
+	"reset_timeout",
 	"runner_version",
 	"drain_on_shutdown",
 	"drain_timeout",
@@ -40,13 +42,11 @@ var HotReloadable = []string{
 // next tick boundary. This is the only field that requires touching live
 // state outside o.cfg.
 //
-// The orchestrator's reconcile loop reads o.cfg under o.mu on each tick, so
-// holding o.mu for the swap is enough to make new values visible to the
-// next reconcile without tearing.
+// Hot fields are published as one immutable atomic snapshot, so concurrent
+// reconcile/control/worker readers never observe a torn configuration.
 func (o *Orchestrator) ApplyHotConfig(newCfg Config) ([]string, error) {
-	o.mu.Lock()
-	cur := o.cfg
-	o.mu.Unlock()
+	applyRuntimeDefaults(&newCfg)
+	cur := o.CurrentConfig()
 
 	changed, blocked := diffConfig(cur, newCfg)
 	if len(blocked) > 0 {
@@ -58,16 +58,14 @@ func (o *Orchestrator) ApplyHotConfig(newCfg Config) ([]string, error) {
 		return nil, nil
 	}
 
-	o.mu.Lock()
-	pollChanged := newCfg.PollInterval != o.cfg.PollInterval
+	pollChanged := newCfg.PollInterval != cur.PollInterval
 	newInterval := newCfg.PollInterval
-	o.cfg = newCfg
-	o.mu.Unlock()
+	o.hot.Store(hotConfigFrom(newCfg))
 
 	if pollChanged && o.pollReset != nil {
 		// Non-blocking: if Run has not yet drained a previous signal,
-		// the latest interval is the one that lands (the receiver reads
-		// o.cfg.PollInterval anyway, the signal just nudges it).
+		// the latest interval is the one that lands; each signal carries the
+		// complete duration needed to recreate the ticker.
 		select {
 		case o.pollReset <- newInterval:
 		default:
@@ -96,10 +94,10 @@ func diffConfig(a, b Config) (changed, blocked []string) {
 func hotFieldDiff(a, b Config) []string {
 	var out []string
 	if a.MaxScale != b.MaxScale {
-		out = append(out, "scale.max")
+		out = append(out, "max_instances")
 	}
-	if !stringSliceEqual(a.Labels, b.Labels) {
-		out = append(out, "forgejo.labels")
+	if a.WarmInstances != b.WarmInstances {
+		out = append(out, "warm_instances")
 	}
 	if a.PollInterval != b.PollInterval {
 		out = append(out, "poll.interval")
@@ -117,13 +115,19 @@ func hotFieldDiff(a, b Config) []string {
 		out = append(out, "destroy_on_exit")
 	}
 	if a.Teardown.IdleTimeout != b.Teardown.IdleTimeout {
-		out = append(out, "poll.idle_timeout")
+		out = append(out, "idle_timeout")
 	}
 	if a.Teardown.HourMargin != b.Teardown.HourMargin {
-		out = append(out, "poll.hour_margin")
+		out = append(out, "hour_margin")
 	}
 	if a.Teardown.BillingHour != b.Teardown.BillingHour {
-		out = append(out, "poll.billing_hour")
+		out = append(out, "billing_hour")
+	}
+	if a.ResetMinRemaining != b.ResetMinRemaining {
+		out = append(out, "reset_min_remaining")
+	}
+	if a.ResetTimeout != b.ResetTimeout {
+		out = append(out, "reset_timeout")
 	}
 	return out
 }
@@ -132,6 +136,30 @@ func hotFieldDiff(a, b Config) []string {
 // values differ between a and b.
 func nonHotFieldDiff(a, b Config) []string {
 	var out []string
+	if a.Tier != b.Tier {
+		out = append(out, "tier")
+	}
+	if a.ProviderName != b.ProviderName {
+		out = append(out, "provider")
+	}
+	if a.Driver != b.Driver {
+		out = append(out, "driver")
+	}
+	if a.InstanceType != b.InstanceType {
+		out = append(out, "instance_type")
+	}
+	if a.ResetMode != b.ResetMode {
+		out = append(out, "reset_mode")
+	}
+	if !stringSliceEqual(a.Labels, b.Labels) {
+		out = append(out, "labels")
+	}
+	if a.OneJobPerVM != b.OneJobPerVM {
+		out = append(out, "one_job_per_vm")
+	}
+	if a.BootstrapFingerprint != b.BootstrapFingerprint {
+		out = append(out, "bootstrap_fingerprint")
+	}
 	if a.Tag != b.Tag {
 		out = append(out, "tag")
 	}
@@ -154,12 +182,23 @@ func stringSliceEqual(a, b []string) bool {
 // CurrentConfig returns a copy of the orchestrator's live runtime config.
 // Used by the control-plane backend on reload to overlay only the hot-fields
 // without losing CLI-flag-derived values (RunnerVersion, drain settings, …)
-// that the on-disk YAML never owned. Returning a copy keeps callers from
-// reaching into o.cfg without taking o.mu.
+// that the on-disk YAML never owned. Returning a copy keeps the immutable base
+// and atomic hot snapshot encapsulated.
 func (o *Orchestrator) CurrentConfig() Config {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.cfg
+	cfg := o.cfg
+	hot := o.runtimeConfig()
+	cfg.MaxScale = hot.MaxScale
+	cfg.WarmInstances = hot.WarmInstances
+	cfg.ResetMinRemaining = hot.ResetMinRemaining
+	cfg.ResetTimeout = hot.ResetTimeout
+	cfg.PollInterval = hot.PollInterval
+	cfg.RunnerVersion = hot.RunnerVersion
+	cfg.Teardown = hot.Teardown
+	cfg.DrainOnShutdown = hot.DrainOnShutdown
+	cfg.DrainTimeout = hot.DrainTimeout
+	cfg.DestroyOnExit = hot.DestroyOnExit
+	cfg.Labels = append([]string(nil), cfg.Labels...)
+	return cfg
 }
 
 // pollResetSignal is exposed for the Run goroutine so it can subscribe to

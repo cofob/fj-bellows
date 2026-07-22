@@ -2,6 +2,7 @@ package control
 
 import (
 	"crypto/subtle"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -47,30 +48,26 @@ func IsLoopbackBind(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// bearerAuth wraps an http.Handler to require an Authorization: Bearer
-// <token> header on Connect RPC paths. The /healthz and /metrics plain-HTTP
-// shims stay open so Prom scrapers and k8s probes don't need to carry the
-// token. (The ticket calls out an optional read/write split — read RPCs open,
-// write RPCs gated — but v1 keeps it simple: all Connect RPCs require the
-// token.) Returns next unchanged when token == "" so callers can install the
-// middleware unconditionally and let configuration choose.
+// bearerAuth requires an Authorization: Bearer <token> header on Connect RPC
+// and dashboard data paths. Health, metrics, and the static dashboard shell
+// stay open; the shell contains no fleet data and sends the token to the API
+// from browser sessionStorage.
 func bearerAuth(next http.Handler, token string) http.Handler {
 	if token == "" {
 		return next
 	}
 	expected := "Bearer " + token
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// /healthz and /metrics are always open; they're consumed by
-		// ecosystem tooling that doesn't speak Connect and can't carry
-		// per-request bearer creds in practice.
-		if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
+		if publicControlPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		got := r.Header.Get("Authorization")
 		// Constant-time compare so a remote attacker can't time-side-channel
 		// the token byte-by-byte.
-		if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+		authorized := subtle.ConstantTimeCompare([]byte(got), []byte(expected)) == 1 ||
+			(r.URL.Path == "/dashboard/ws" && websocketBearerMatches(r, token))
+		if !authorized {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="fjb-control"`)
 			w.WriteHeader(http.StatusUnauthorized)
 			// Tiny JSON body so curl --fail and Connect clients both see a
@@ -81,4 +78,31 @@ func bearerAuth(next http.Handler, token string) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func publicControlPath(path string) bool {
+	if path == "/" || path == "/healthz" || path == "/metrics" || path == "/dashboard" {
+		return true
+	}
+	switch path {
+	case "/dashboard/", "/dashboard/index.html", "/dashboard/app.css", "/dashboard/app.js":
+		return true
+	default:
+		return false
+	}
+}
+
+func websocketBearerMatches(r *http.Request, token string) bool {
+	const prefix = "fjb-bearer."
+	for protocol := range strings.SplitSeq(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+		protocol = strings.TrimSpace(protocol)
+		if !strings.HasPrefix(protocol, prefix) {
+			continue
+		}
+		decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(protocol, prefix))
+		if err == nil && subtle.ConstantTimeCompare(decoded, []byte(token)) == 1 {
+			return true
+		}
+	}
+	return false
 }

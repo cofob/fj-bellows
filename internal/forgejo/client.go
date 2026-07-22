@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 
 // Client talks to a single Forgejo instance, scoped to one runner owner.
 type Client struct {
+	api    string // <url>/api/v1
 	base   string // <url>/api/v1/<scope>
 	token  string
 	labels []string
@@ -31,11 +33,75 @@ type Client struct {
 func New(rawURL, scope, token string, labels ...string) *Client {
 	base := strings.TrimRight(rawURL, "/") + "/api/v1/" + strings.Trim(scope, "/")
 	return &Client{
+		api:    strings.TrimRight(rawURL, "/") + "/api/v1",
 		base:   base,
 		token:  token,
 		labels: labels,
 		hc:     &http.Client{Timeout: 30 * time.Second},
 	}
+}
+
+// ErrMetadataUnavailable means this Forgejo does not expose the optional
+// Actions job/run lookup endpoints. It is not a dispatch failure.
+var ErrMetadataUnavailable = errors.New("forgejo job metadata unavailable")
+
+// JobMetadata enriches a queue record with repository/workflow identity when
+// supported. It deliberately sits outside orchestrator.JobSource so older
+// mocks and alternate queue implementations need not implement it.
+func (c *Client) JobMetadata(ctx context.Context, job WaitingJob) (JobMetadata, error) {
+	if job.RepoID == 0 {
+		return JobMetadata{}, ErrMetadataUnavailable
+	}
+	var repo struct {
+		FullName string `json:"full_name"`
+	}
+	raw, err := c.doURL(ctx, http.MethodGet, c.api+"/repositories/"+strconv.FormatInt(job.RepoID, 10), nil)
+	if err != nil || json.Unmarshal(raw, &repo) != nil || repo.FullName == "" {
+		return JobMetadata{}, fmt.Errorf("%w: repository lookup", ErrMetadataUnavailable)
+	}
+	parts := strings.SplitN(repo.FullName, "/", 2)
+	if len(parts) != 2 {
+		return JobMetadata{}, fmt.Errorf("%w: malformed repository name", ErrMetadataUnavailable)
+	}
+	base := c.api + "/repos/" + url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1])
+	var detail struct {
+		RunID       int64  `json:"run_id"`
+		CommitSHA   string `json:"commit_sha"`
+		Status      string `json:"status"`
+		Conclusion  string `json:"conclusion"`
+		QueuedAt    string `json:"queued_at"`
+		StartedAt   string `json:"started_at"`
+		CompletedAt string `json:"completed_at"`
+	}
+	raw, err = c.doURL(ctx, http.MethodGet, base+"/actions/jobs/"+strconv.FormatInt(job.ID, 10), nil)
+	if err != nil || json.Unmarshal(raw, &detail) != nil {
+		return JobMetadata{}, fmt.Errorf("%w: job lookup", ErrMetadataUnavailable)
+	}
+	meta := JobMetadata{
+		Repository: repo.FullName, RunID: detail.RunID, CommitSHA: detail.CommitSHA,
+		Status: detail.Status, Conclusion: detail.Conclusion, QueuedAt: detail.QueuedAt,
+		StartedAt: detail.StartedAt, CompletedAt: detail.CompletedAt,
+	}
+	if meta.RunID == 0 {
+		meta.RunID = job.RunID
+	}
+	if meta.RunID == 0 {
+		return meta, nil
+	}
+	var run struct {
+		WorkflowID string `json:"workflow_id"`
+		Ref        string `json:"ref"`
+		Event      string `json:"event"`
+		CommitSHA  string `json:"head_sha"`
+	}
+	if runRaw, runErr := c.doURL(ctx, http.MethodGet, base+"/actions/runs/"+strconv.FormatInt(meta.RunID, 10), nil); runErr == nil {
+		_ = json.Unmarshal(runRaw, &run)
+		meta.WorkflowID, meta.Ref, meta.Event = run.WorkflowID, run.Ref, run.Event
+		if meta.CommitSHA == "" {
+			meta.CommitSHA = run.CommitSHA
+		}
+	}
+	return meta, nil
 }
 
 // WaitingJobs returns jobs currently waiting for a runner that match the
@@ -145,11 +211,15 @@ func (c *Client) DeleteRunner(ctx context.Context, id int64) error {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	return c.doURL(ctx, method, c.base+path, body)
+}
+
+func (c *Client) doURL(ctx context.Context, method, requestURL string, body []byte) ([]byte, error) {
 	var r io.Reader
 	if body != nil {
 		r = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, r)
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, r)
 	if err != nil {
 		return nil, err
 	}
@@ -160,12 +230,12 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]by
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, path, err)
+		return nil, fmt.Errorf("%s %s: %w", method, requestURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%s %s: status %d: %s", method, path, resp.StatusCode, raw)
+		return nil, fmt.Errorf("%s %s: status %d: %s", method, requestURL, resp.StatusCode, raw)
 	}
 	return raw, nil
 }

@@ -10,6 +10,8 @@
 //	fjbctl reconcile  — drive a synchronous reconcile tick
 //	fjbctl events     — stream state-transition events
 //	fjbctl info       — ProviderInfo: provider's operator-debug key/value map
+//	fjbctl jobs       — durable job history from SQLite
+//	fjbctl stats      — workflow timing, outcomes, and cost statistics
 //
 // Output is human-readable by default; pass --json to any subcommand for the
 // raw protobuf-JSON response.
@@ -48,6 +50,10 @@ func run(args []string, stdout, stderr *os.File) int {
 		return cmdEvents(rest, stdout, stderr)
 	case "info":
 		return cmdInfo(rest, stdout, stderr)
+	case "jobs":
+		return cmdJobs(rest, stdout, stderr)
+	case "stats":
+		return cmdStats(rest, stdout, stderr)
 	default:
 		outf(stderr, "fjbctl: unknown subcommand %q\n\n", cmd)
 		printUsage(stderr)
@@ -68,6 +74,8 @@ Subcommands:
   reconcile   Drive one synchronous reconcile tick; print the counter summary.
   events      Stream state-transition events as they happen.
   info        ProviderInfo: provider's operator-debug key/value map.
+  jobs        Durable CI job history with tier/workflow/status filters.
+  stats       Aggregate job timing, outcomes, and fixed-point cost estimates.
 
 Common flags (all subcommands):
   -listen <host:port>      Daemon control plane address.
@@ -83,5 +91,7 @@ Examples:
   fjbctl workers --watch
   fjbctl reconcile
   fjbctl info
-  fjbctl -listen 100.x.y.z:9876 -token-file ~/.fjb.token events`)
+  fjbctl jobs -since 24h -tier long
+  fjbctl stats -since 168h -group-by workflow
+  fjbctl events -listen 100.x.y.z:9876 -token-file ~/.fjb.token`)
 }

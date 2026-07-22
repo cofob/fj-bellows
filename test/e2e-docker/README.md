@@ -22,8 +22,8 @@ on `main`.
    - commits `.forgejo/workflows/echo.yml` (workflow with `runs-on: docker`)
      via the contents API — the push auto-queues a workflow run;
    - polls `/actions/runners/jobs?labels=docker` until the job appears.
-4. Builds `fj-bellows`, writes a `config.yaml` pointing at the service Forgejo
-   with `provider: docker`, and launches `fj-bellows` in the background
+4. Builds `fj-bellows`, writes a tiers-only `config.yaml` pointing at the
+   service Forgejo with a named Docker provider, and launches it in the background
    capturing stderr to `fj-bellows.log`.
 5. Runs `assert.sh`, which validates the full happy path:
    - the orchestrator did NOT log "poll waiting jobs" decode errors (i.e. the
@@ -82,17 +82,23 @@ forgejo:
   url: $FORGEJO_INTERNAL_URL
   token: $TOKEN
   scope: orgs/$FORGEJO_ORG
-  labels: [$FORGEJO_LABEL]
+database:
+  path: /tmp/fjb-integ.db
 tag: fjb-integ-local
-scale:
-  max: 1
-provider: docker
-provider_config:
-  image: fj-bellows-worker:test
+providers:
+  local:
+    driver: docker
+    config:
+      image: fj-bellows-worker:test
+tiers:
+  local:
+    required_label: $FORGEJO_LABEL
+    provider: local
+    instance_type: local
+    max_instances: 1
+    idle_timeout: 5s
 poll:
   interval: 2s
-  idle_timeout: 5s
-  hour_margin: 5m
 YAML
 
 # 5. Run fj-bellows for a while, then assert.
@@ -104,12 +110,13 @@ chmod 600 /tmp/fjb-integ-config.yaml
 FJBELLOWS_PID=$!
 sleep 30
 
-FJBELLOWS_LOG=/tmp/fjb-integ.log FJBELLOWS_TAG=fjb-integ-local \
+FJBELLOWS_LOG=/tmp/fjb-integ.log \
+  FJBELLOWS_TAG=fjb-t-7c783b5af83b4bd04999a4c06f57a4b9ae590bcd \
   bash test/e2e-docker/assert.sh
 
 # 6. Cleanup.
 kill "$FJBELLOWS_PID" 2>/dev/null || true
 docker rm -f fjb-integ-forgejo || true
-docker ps -a --filter label=fj-bellows.tag=fjb-integ-local -q | \
+docker ps -a --filter label=fj-bellows.tag=fjb-t-7c783b5af83b4bd04999a4c06f57a4b9ae590bcd -q | \
   xargs -r docker rm -f
 ```

@@ -18,6 +18,7 @@ func cmdInfo(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var cf commonFlags
 	registerCommonFlags(fs, &cf)
+	provider := fs.String("provider", "", "named provider to inspect")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -29,7 +30,7 @@ func cmdInfo(args []string, stdout, stderr io.Writer) int {
 
 	ctx, cancel := contextWithTimeout()
 	defer cancel()
-	resp, err := client.ProviderInfo(ctx, connect.NewRequest(&controlv1.ProviderInfoRequest{}))
+	resp, err := client.ProviderInfo(ctx, connect.NewRequest(&controlv1.ProviderInfoRequest{Provider: *provider}))
 	if err != nil {
 		return fmtErr(stderr, err)
 	}

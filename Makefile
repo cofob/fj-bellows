@@ -1,4 +1,4 @@
-.PHONY: build test race lint lint-fix fmt vuln proto proto-check
+.PHONY: build test race lint lint-fix fmt proto proto-check
 
 build:
 	go build ./...
@@ -28,6 +28,3 @@ lint-fix:
 
 fmt:
 	golangci-lint fmt ./...
-
-vuln:
-	go run golang.org/x/vuln/cmd/govulncheck@latest ./...

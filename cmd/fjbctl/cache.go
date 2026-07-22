@@ -14,6 +14,7 @@ func cmdCache(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var cf commonFlags
 	registerCommonFlags(fs, &cf)
+	provider := fs.String("provider", "", "named provider that owns the cache")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -25,7 +26,7 @@ func cmdCache(args []string, stdout, stderr io.Writer) int {
 
 	ctx, cancel := contextWithTimeout()
 	defer cancel()
-	resp, err := client.GetCache(ctx, connect.NewRequest(&controlv1.GetCacheRequest{}))
+	resp, err := client.GetCache(ctx, connect.NewRequest(&controlv1.GetCacheRequest{Provider: *provider}))
 	if err != nil {
 		return fmtErr(stderr, err)
 	}

@@ -7,6 +7,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func configWithProviderNode(name, driver string, node yaml.Node) *Config {
+	return &Config{Providers: map[string]ProviderInstance{
+		name: {Driver: driver, Config: node},
+	}}
+}
+
 func TestRedact_NilReturnsNil(t *testing.T) {
 	if Redact(nil) != nil {
 		t.Fatal("Redact(nil) should be nil")
@@ -65,10 +71,11 @@ cache:
 	if err := yaml.Unmarshal([]byte(src), &node); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	cfg := &Config{ProviderConfig: node}
+	cfg := configWithProviderNode("linode-main", "linode", node)
 	got := Redact(cfg)
 
-	out, err := yaml.Marshal(&got.ProviderConfig)
+	redactedProvider := got.Providers["linode-main"]
+	out, err := yaml.Marshal(&redactedProvider.Config)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -87,7 +94,8 @@ cache:
 	}
 
 	// Original must be untouched (Redact must deep-copy the node tree).
-	origOut, _ := yaml.Marshal(&cfg.ProviderConfig)
+	originalProvider := cfg.Providers["linode-main"]
+	origOut, _ := yaml.Marshal(&originalProvider.Config)
 	if !strings.Contains(string(origOut), "real-linode-pat") {
 		t.Errorf("original was mutated:\n%s", origOut)
 	}
@@ -103,9 +111,10 @@ runtime: docker
 	if err := yaml.Unmarshal([]byte(src), &node); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	cfg := &Config{ProviderConfig: node}
+	cfg := configWithProviderNode("local", "docker", node)
 	got := Redact(cfg)
-	out, _ := yaml.Marshal(&got.ProviderConfig)
+	redactedProvider := got.Providers["local"]
+	out, _ := yaml.Marshal(&redactedProvider.Config)
 	s := string(out)
 	if !strings.Contains(s, "image: example/worker:latest") {
 		t.Errorf("image was lost:\n%s", s)
@@ -132,9 +141,10 @@ region: us-east
 	if err := yaml.Unmarshal([]byte(src), &node); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	cfg := &Config{ProviderConfig: node}
+	cfg := configWithProviderNode("cloud", "test", node)
 	got := Redact(cfg)
-	out, _ := yaml.Marshal(&got.ProviderConfig)
+	redactedProvider := got.Providers["cloud"]
+	out, _ := yaml.Marshal(&redactedProvider.Config)
 	s := string(out)
 	for _, leaked := range []string{"t1", "p1", "s1", "k1", "a1", "ak1", "sk1"} {
 		if strings.Contains(s, ": "+leaked+"\n") || strings.HasSuffix(strings.TrimSpace(s), ": "+leaked) {
@@ -157,9 +167,10 @@ SecretRecipe: harmless-substring-match
 	if err := yaml.Unmarshal([]byte(src), &node); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	cfg := &Config{ProviderConfig: node}
+	cfg := configWithProviderNode("cloud", "test", node)
 	got := Redact(cfg)
-	out, _ := yaml.Marshal(&got.ProviderConfig)
+	redactedProvider := got.Providers["cloud"]
+	out, _ := yaml.Marshal(&redactedProvider.Config)
 	s := string(out)
 	if strings.Contains(s, "real-upper") {
 		t.Errorf("TOKEN should match case-insensitively:\n%s", s)

@@ -6,19 +6,7 @@ import (
 	"time"
 )
 
-const validBaseConfig = `
-forgejo:
-  url: https://forgejo.example.com
-  token: tok
-  scope: orgs/example
-  labels: [ubuntu-latest]
-provider: linode
-provider_config:
-  region: us-ord
-  type: g6-nanode-1
-ssh:
-  private_key_file: /tmp/id
-transport:
+const validBaseConfig = validLinodeConfig + `transport:
   mode: cache-gateway
   tunnel:
     routes: [10.99.0.0/24]
@@ -270,19 +258,7 @@ func TestWG_Validation(t *testing.T) {
 // SSH mode ignores stray wg blocks — matches the existing tunnel-block
 // tolerance (operators may toggle modes mid-edit).
 func TestWG_IgnoredInSSHMode(t *testing.T) {
-	path := writeTemp(t, "config.yaml", `
-forgejo:
-  url: https://forgejo.example.com
-  token: tok
-  scope: orgs/example
-  labels: [ubuntu-latest]
-provider: linode
-provider_config:
-  region: us-ord
-  type: g6-nanode-1
-ssh:
-  private_key_file: /tmp/id
-transport:
+	path := writeTemp(t, "config.yaml", validLinodeConfig+`transport:
   mode: ssh
   wg:
     private_key_file: /tmp/should-not-be-validated

@@ -29,8 +29,11 @@ type HealthStatus struct {
 // are populated from the orchestrator's TeardownPolicy via Timing(); see
 // FJB-30.
 type WorkerView struct {
-	InstanceID string
-	State      string
+	Tier         string
+	ProviderName string
+	Driver       string
+	InstanceID   string
+	State        string
 	// IP is the public IPv4 (legacy dial address under ssh transport).
 	IP string
 	// VPCIP is the VPC-side IPv4 (dial address under cache-gateway
@@ -53,6 +56,56 @@ type WorkerView struct {
 	BillingModel string
 }
 
+// RoutingTierSnapshot is the read-only capacity and billing view consumed by
+// the fleet-level auto-router. It never reserves or mutates capacity.
+type RoutingTierSnapshot struct {
+	Tier              string
+	ProviderName      string
+	Driver            string
+	InstanceType      string
+	Labels            []string
+	OneJobPerVM       bool
+	ResetMode         string
+	ResetMinRemaining time.Duration
+	Healthy           bool
+	MaxInstances      int
+	ActiveWorkers     int
+	PendingWorkers    int
+	AvailableSlots    int
+	IdleWorkers       []WorkerView
+	Workers           []WorkerView
+	Teardown          TeardownPolicy
+}
+
+// RoutingSnapshot returns a coherent-enough scoring snapshot. The target
+// reconciler rechecks capacity before provisioning, so normal concurrent state
+// movement can only delay a routed job, never exceed MaxScale.
+func (o *Orchestrator) RoutingSnapshot(ctx context.Context) RoutingTierSnapshot {
+	runtime := o.runtimeConfig()
+	o.mu.Lock()
+	pending, builders := o.pending, o.builders
+	o.mu.Unlock()
+	workers := o.PoolSnapshot()
+	idle := make([]WorkerView, 0, len(workers))
+	for _, worker := range workers {
+		if worker.State == string(StateIdle) {
+			idle = append(idle, worker)
+		}
+	}
+	active := len(workers) + pending + builders
+	return RoutingTierSnapshot{
+		Tier: o.cfg.Tier, ProviderName: o.cfg.ProviderName, Driver: o.cfg.Driver,
+		InstanceType: o.cfg.InstanceType, Labels: append([]string(nil), o.cfg.Labels...),
+		OneJobPerVM: o.cfg.OneJobPerVM, ResetMode: o.cfg.ResetMode,
+		ResetMinRemaining: runtime.ResetMinRemaining,
+		Healthy:           o.Health(ctx).Healthy, MaxInstances: runtime.MaxScale,
+		ActiveWorkers: len(workers), PendingWorkers: pending + builders,
+		AvailableSlots: max(runtime.MaxScale-active, 0), IdleWorkers: idle,
+		Workers:  workers,
+		Teardown: runtime.Teardown,
+	}
+}
+
 // PoolSnapshot returns a copy of every node currently in the pool.
 // Equivalent of Pool.Snapshot but stringified for the wire (NodeState → string).
 // Each view also carries the per-worker billing-window timing computed
@@ -60,10 +113,14 @@ type WorkerView struct {
 func (o *Orchestrator) PoolSnapshot() []WorkerView {
 	nodes := o.pool.Snapshot()
 	now := o.now()
+	runtime := o.runtimeConfig()
 	out := make([]WorkerView, 0, len(nodes))
 	for _, n := range nodes {
-		t := o.cfg.Teardown.Timing(n, now)
+		t := runtime.Teardown.Timing(n, now)
 		out = append(out, WorkerView{
+			Tier:           o.cfg.Tier,
+			ProviderName:   o.cfg.ProviderName,
+			Driver:         o.cfg.Driver,
 			InstanceID:     n.InstanceID,
 			State:          string(n.State),
 			IP:             n.IP,
@@ -89,12 +146,13 @@ func (o *Orchestrator) Health(_ context.Context) HealthStatus {
 	fj := o.lastForgejoPollAt
 	o.mu.Unlock()
 
-	threshold := 3 * o.cfg.PollInterval
+	threshold := 3 * o.runtimeConfig().PollInterval
 	now := o.now()
 	healthy := !tick.IsZero() &&
 		now.Sub(tick) <= threshold &&
 		!prov.IsZero() && now.Sub(prov) <= threshold &&
-		!fj.IsZero() && now.Sub(fj) <= threshold
+		!fj.IsZero() && now.Sub(fj) <= threshold &&
+		!o.storageFailed.Load()
 
 	return HealthStatus{
 		Healthy:            healthy,

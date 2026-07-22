@@ -43,10 +43,33 @@ func cmdHealth(args []string, stdout, stderr io.Writer) int {
 	outf(stdout, "  last_tick           %s\n", ageOrNever(resp.Msg.LastTickAt))
 	outf(stdout, "  last_provider_list  %s\n", ageOrNever(resp.Msg.LastProviderListAt))
 	outf(stdout, "  last_forgejo_poll   %s\n", ageOrNever(resp.Msg.LastForgejoPollAt))
+	databaseState := "DEGRADED"
+	if resp.Msg.DatabaseHealthy {
+		databaseState = "HEALTHY"
+	}
+	outf(stdout, "  database            %s\n", databaseState)
+	outf(stdout, "  database_last_write %s\n", ageOrNever(resp.Msg.DatabaseLastSuccessfulWriteAt))
+	outf(stdout, "  database_last_error %s\n", emptyDash(resp.Msg.DatabaseLastError))
+	routingState := "HEALTHY"
+	if !resp.Msg.RoutingHealthy {
+		routingState = "DEGRADED"
+	}
+	outf(stdout, "  routing             %s\n", routingState)
+	outf(stdout, "  routing_last_poll   %s\n", ageOrNever(resp.Msg.RoutingLastPollAt))
+	outf(stdout, "  routing_last_choice %s\n", ageOrNever(resp.Msg.RoutingLastDecisionAt))
+	outf(stdout, "  routing_pricing     %s\n", routingPricingState(resp.Msg.RoutingDegradedPricing))
+	outf(stdout, "  routing_last_error  %s\n", emptyDash(resp.Msg.RoutingLastError))
 	if !resp.Msg.Healthy {
 		return 1
 	}
 	return 0
+}
+
+func routingPricingState(degraded bool) string {
+	if degraded {
+		return "DEGRADED (cached prices)"
+	}
+	return "CURRENT"
 }
 
 // ageOrNever renders an "X ago" for a non-zero proto timestamp, or "never"

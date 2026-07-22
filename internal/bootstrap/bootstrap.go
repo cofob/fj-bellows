@@ -4,8 +4,10 @@ package bootstrap
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,6 +20,9 @@ var cloudInitTemplate string
 //go:embed fjbagent.service
 var fjbagentServiceUnit string
 
+//go:embed snapshot-contract.version
+var snapshotContractVersion string
+
 // DefaultReadyFile is touched by cloud-init once the worker is provisioned.
 // The orchestrator polls for it over SSH to decide a node is ready.
 const DefaultReadyFile = "/run/fj-bellows-ready"
@@ -27,6 +32,27 @@ const DefaultReadyFile = "/run/fj-bellows-ready"
 // a constant so the orchestrator dialer and the cloud-init renderer agree
 // without an extra config knob.
 const DefaultAgentListenPort = 9001
+
+// SnapshotContractMarker identifies every static input baked into a managed
+// worker image. Embedded bootstrap changes invalidate the marker
+// automatically. The embedded compatibility epoch is also bumped whenever
+// the orchestrator's sysprep contract changes.
+func SnapshotContractMarker() string {
+	return snapshotContractMarker(
+		strings.TrimSpace(snapshotContractVersion),
+		cloudInitTemplate,
+		fjbagentServiceUnit,
+	)
+}
+
+func snapshotContractMarker(version, cloudInit, serviceUnit string) string {
+	h := sha256.New()
+	for _, component := range []string{version, cloudInit, serviceUnit} {
+		_, _ = fmt.Fprintf(h, "%d:", len(component))
+		_, _ = h.Write([]byte(component))
+	}
+	return version + ":" + hex.EncodeToString(h.Sum(nil))
+}
 
 // DefaultAgentDownloadURLTemplate is the URL the orchestrator resolves
 // against its own build version (via ResolveAgentDownloadURL) before

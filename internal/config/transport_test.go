@@ -8,19 +8,7 @@ import (
 // TestTransportDefaults — empty Transport block defaults to "ssh" so existing
 // configs keep working unchanged.
 func TestTransportDefaults(t *testing.T) {
-	path := writeTemp(t, "config.yaml", `
-forgejo:
-  url: https://forgejo.example.com
-  token: tok
-  scope: orgs/example
-  labels: [ubuntu-latest]
-provider: linode
-provider_config:
-  region: us-ord
-  type: g6-nanode-1
-ssh:
-  private_key_file: /tmp/id
-`)
+	path := writeTemp(t, "config.yaml", validLinodeConfig)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -35,19 +23,7 @@ ssh:
 
 // TestTransportCacheGatewayValid — full cache-gateway block parses + validates.
 func TestTransportCacheGatewayValid(t *testing.T) {
-	path := writeTemp(t, "config.yaml", `
-forgejo:
-  url: https://forgejo.example.com
-  token: tok
-  scope: orgs/example
-  labels: [ubuntu-latest]
-provider: linode
-provider_config:
-  region: us-ord
-  type: g6-nanode-1
-ssh:
-  private_key_file: /tmp/id
-transport:
+	path := writeTemp(t, "config.yaml", validLinodeConfig+`transport:
   mode: cache-gateway
   tunnel:
     routes:
@@ -200,19 +176,7 @@ func TestTransportCacheGatewayValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			path := writeTemp(t, "config.yaml", `
-forgejo:
-  url: https://forgejo.example.com
-  token: tok
-  scope: orgs/example
-  labels: [ubuntu-latest]
-provider: linode
-provider_config:
-  region: us-ord
-  type: g6-nanode-1
-ssh:
-  private_key_file: /tmp/id
-`+tt.transport+"\n")
+			path := writeTemp(t, "config.yaml", validLinodeConfig+tt.transport+"\n")
 			_, err := Load(path)
 			if err == nil {
 				t.Fatalf("Load: want error containing %q, got nil", tt.wantErr)
@@ -226,19 +190,7 @@ ssh:
 
 // TestTransportProtoCaseInsensitive — proto "TCP" / "UDP" should also work.
 func TestTransportProtoCaseInsensitive(t *testing.T) {
-	path := writeTemp(t, "config.yaml", `
-forgejo:
-  url: https://forgejo.example.com
-  token: tok
-  scope: orgs/example
-  labels: [ubuntu-latest]
-provider: linode
-provider_config:
-  region: us-ord
-  type: g6-nanode-1
-ssh:
-  private_key_file: /tmp/id
-transport:
+	path := writeTemp(t, "config.yaml", validLinodeConfig+`transport:
   mode: cache-gateway
   tunnel:
     routes: [192.168.0.0/24]
@@ -253,19 +205,7 @@ transport:
 // TestTransportSSHIgnoresTunnel — having a stray tunnel block under mode "ssh"
 // is allowed (operators may toggle modes mid-edit); it just doesn't apply.
 func TestTransportSSHIgnoresTunnel(t *testing.T) {
-	path := writeTemp(t, "config.yaml", `
-forgejo:
-  url: https://forgejo.example.com
-  token: tok
-  scope: orgs/example
-  labels: [ubuntu-latest]
-provider: linode
-provider_config:
-  region: us-ord
-  type: g6-nanode-1
-ssh:
-  private_key_file: /tmp/id
-transport:
+	path := writeTemp(t, "config.yaml", validLinodeConfig+`transport:
   mode: ssh
   tunnel:
     routes: [bad-cidr-that-would-fail-validation]

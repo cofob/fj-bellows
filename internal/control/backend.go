@@ -75,8 +75,8 @@ type Backend interface {
 	GetConfig(ctx context.Context) (yamlText, configPath string)
 
 	// ReloadConfig re-reads config.yaml from disk and hot-swaps the
-	// hot-reloadable subset (poll intervals, scale.max, labels, runner
-	// version, drain settings). Returns the list of changed dotted-key
+	// hot-reloadable subset (poll intervals, capacity/timers, runner version,
+	// and drain settings). Returns the list of changed dotted-key
 	// field names; the error case is "the new config changes a non-hot
 	// field" — the daemon refuses to partially apply and the caller maps
 	// the error to CodeFailedPrecondition.
@@ -127,8 +127,11 @@ type CacheStatus struct {
 // Mirrors orchestrator.Node plus the in-flight job handle and the billing-
 // window snapshot (FJB-30) computed from the current TeardownPolicy.
 type WorkerView struct {
-	InstanceID string
-	State      string
+	Tier         string
+	ProviderName string
+	Driver       string
+	InstanceID   string
+	State        string
 	// IP is the public IPv4 (legacy dial address under ssh transport).
 	IP string
 	// VPCIP is the VPC-side IPv4 (dial address under cache-gateway
@@ -171,4 +174,17 @@ type HealthStatus struct {
 	// Paused reports whether the reconciler's auto-tick has been
 	// suppressed by a Pause RPC. Independent of Healthy.
 	Paused bool
+
+	// DatabaseHealthy is the SQLite connection/write-health signal. The
+	// daemon is not ready to mutate cloud state when durable writes fail.
+	DatabaseHealthy             bool
+	DatabaseLastSuccessfulWrite time.Time
+	DatabaseLastError           string
+
+	// Routing fields are zero-valued when automatic routing is not configured.
+	RoutingHealthy         bool
+	RoutingLastPollAt      time.Time
+	RoutingLastDecisionAt  time.Time
+	RoutingLastError       string
+	RoutingDegradedPricing bool
 }

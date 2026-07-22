@@ -1,8 +1,8 @@
 // Package docker implements the provider.Provider interface against the local
 // Docker daemon by shelling out to the `docker` CLI. This avoids importing the
-// Docker Go SDK (which trips govulncheck GO-2026-4887, unfixable, and pulls a
-// large dependency tree). Operators of this provider already require a working
-// Docker install; requiring the `docker` binary on PATH is no extra cost.
+// large Docker SDK dependency tree and gives tests a narrow interface to fake.
+// Operators of this provider already require a working Docker install;
+// requiring the `docker` binary on PATH is no extra cost.
 package docker
 
 import (

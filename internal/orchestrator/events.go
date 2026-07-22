@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"maps"
 
 	"github.com/hstern/fj-bellows/internal/control/events"
 )
@@ -19,6 +20,8 @@ const (
 	attrName       = "name"
 	attrUUID       = "uuid"
 	attrCaller     = "caller"
+	attrReason     = "reason"
+	attrStage      = "stage"
 )
 
 // emit publishes a state-transition event to the orchestrator's event bus
@@ -28,7 +31,17 @@ func (o *Orchestrator) emit(typ string, attrs map[string]string) {
 	if o.events == nil {
 		return
 	}
-	o.events.Publish(events.Event{At: o.now(), Type: typ, Attrs: attrs})
+	if attrs == nil {
+		attrs = map[string]string{}
+	}
+	// Copy before enriching: callers frequently reuse a literal map and the
+	// event bus intentionally does not deep-copy events for every subscriber.
+	enriched := make(map[string]string, len(attrs)+3)
+	maps.Copy(enriched, attrs)
+	enriched["tier"] = o.cfg.Tier
+	enriched["provider"] = o.cfg.ProviderName
+	enriched["driver"] = o.cfg.Driver
+	o.events.Publish(events.Event{At: o.now(), Type: typ, Attrs: enriched})
 }
 
 // Subscribe returns a channel of state-transition events plus a cancel func.

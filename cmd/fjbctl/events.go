@@ -21,6 +21,8 @@ func cmdEvents(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var cf commonFlags
 	registerCommonFlags(fs, &cf)
+	tier := fs.String("tier", "", "only events from this tier")
+	provider := fs.String("provider", "", "only events from this named provider")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -35,7 +37,7 @@ func cmdEvents(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	stream, err := client.StreamEvents(ctx, connect.NewRequest(&controlv1.StreamEventsRequest{}))
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(&controlv1.StreamEventsRequest{Tier: *tier, Provider: *provider}))
 	if err != nil {
 		return fmtErr(stderr, err)
 	}

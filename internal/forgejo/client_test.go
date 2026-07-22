@@ -3,11 +3,18 @@ package forgejo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+)
+
+const (
+	metadataToken          = "metadata-secret"
+	metadataRepositoryPath = "/api/v1/repositories/42"
 )
 
 func TestWaitingJobsBareArray(t *testing.T) {
@@ -212,5 +219,148 @@ func TestDoNon2xx(t *testing.T) {
 	c := New(srv.URL, "orgs/x", "t")
 	if _, err := c.WaitingJobs(context.Background()); err == nil {
 		t.Fatal("expected error on 403")
+	}
+}
+
+//nolint:gocyclo // This integration-style handler validates every request and all enriched response fields.
+func TestJobMetadataEnrichesRepositoryJobAndRun(t *testing.T) {
+	expectedPaths := []string{
+		metadataRepositoryPath,
+		"/api/v1/repos/example/project/actions/jobs/7",
+		"/api/v1/repos/example/project/actions/runs/99",
+	}
+	var requestIndex atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		index := int(requestIndex.Add(1)) - 1
+		if index >= len(expectedPaths) {
+			t.Errorf("unexpected extra request: %s %s", r.Method, r.URL.EscapedPath())
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("request %d method = %s, want GET", index, r.Method)
+		}
+		if r.URL.EscapedPath() != expectedPaths[index] {
+			t.Errorf("request %d path = %q, want %q", index, r.URL.EscapedPath(), expectedPaths[index])
+		}
+		if got := r.Header.Get("Authorization"); got != "token "+metadataToken {
+			t.Errorf("request %d authorization = %q", index, got)
+		}
+		if got := r.Header.Get("Accept"); got != "application/json" {
+			t.Errorf("request %d accept = %q", index, got)
+		}
+		switch index {
+		case 0:
+			_, _ = io.WriteString(w, `{"full_name":"example/project"}`)
+		case 1:
+			_, _ = io.WriteString(w, `{"run_id":99,"commit_sha":"job-sha","status":"completed","conclusion":"success","queued_at":"2026-07-22T10:00:00Z","started_at":"2026-07-22T10:01:00Z","completed_at":"2026-07-22T10:06:00Z"}`)
+		case 2:
+			_, _ = io.WriteString(w, `{"workflow_id":".forgejo/workflows/ci.yml","ref":"refs/heads/main","event":"push","head_sha":"run-sha"}`)
+		}
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "orgs/example", metadataToken)
+	meta, err := client.JobMetadata(context.Background(), WaitingJob{ID: 7, RepoID: 42})
+	if err != nil {
+		t.Fatalf("JobMetadata: %v", err)
+	}
+	if int(requestIndex.Load()) != len(expectedPaths) {
+		t.Fatalf("requests = %d, want %d", requestIndex.Load(), len(expectedPaths))
+	}
+	if meta.Repository != "example/project" || meta.WorkflowID != ".forgejo/workflows/ci.yml" ||
+		meta.RunID != 99 || meta.Ref != "refs/heads/main" || meta.Event != "push" ||
+		meta.CommitSHA != "job-sha" || meta.Status != "completed" || meta.Conclusion != "success" ||
+		meta.QueuedAt != "2026-07-22T10:00:00Z" || meta.StartedAt != "2026-07-22T10:01:00Z" ||
+		meta.CompletedAt != "2026-07-22T10:06:00Z" {
+		t.Fatalf("metadata = %#v", meta)
+	}
+}
+
+func TestJobMetadataFallsBackToWaitingJobRunID(t *testing.T) {
+	var runPath atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "token "+metadataToken {
+			t.Errorf("authorization = %q", got)
+		}
+		switch r.URL.EscapedPath() {
+		case metadataRepositoryPath:
+			_, _ = io.WriteString(w, `{"full_name":"example/project"}`)
+		case "/api/v1/repos/example/project/actions/jobs/7":
+			_, _ = io.WriteString(w, `{"run_id":0,"commit_sha":""}`)
+		case "/api/v1/repos/example/project/actions/runs/123":
+			runPath.Store(r.URL.EscapedPath())
+			_, _ = io.WriteString(w, `{"workflow_id":"fallback.yml","head_sha":"fallback-sha"}`)
+		default:
+			t.Errorf("unexpected path %q", r.URL.EscapedPath())
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "orgs/example", metadataToken)
+	meta, err := client.JobMetadata(context.Background(), WaitingJob{ID: 7, RepoID: 42, RunID: 123})
+	if err != nil {
+		t.Fatalf("JobMetadata: %v", err)
+	}
+	if meta.RunID != 123 || meta.WorkflowID != "fallback.yml" || meta.CommitSHA != "fallback-sha" {
+		t.Fatalf("metadata = %#v", meta)
+	}
+	if got, _ := runPath.Load().(string); got != "/api/v1/repos/example/project/actions/runs/123" {
+		t.Fatalf("run lookup path = %q", got)
+	}
+}
+
+func TestJobMetadataUnavailable(t *testing.T) {
+	t.Run("missing repo ID does not perform lookup", func(t *testing.T) {
+		var requests atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			requests.Add(1)
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		client := New(srv.URL, "orgs/example", metadataToken)
+		_, err := client.JobMetadata(context.Background(), WaitingJob{ID: 7})
+		if !errors.Is(err, ErrMetadataUnavailable) {
+			t.Fatalf("error = %v, want ErrMetadataUnavailable", err)
+		}
+		if requests.Load() != 0 {
+			t.Fatalf("requests = %d, want 0", requests.Load())
+		}
+	})
+
+	for _, test := range []struct {
+		name      string
+		failPath  string
+		wantStage string
+	}{
+		{name: "repository lookup failure", failPath: metadataRepositoryPath, wantStage: "repository lookup"},
+		{name: "job lookup failure", failPath: "/api/v1/repos/example/project/actions/jobs/7", wantStage: "job lookup"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.EscapedPath() == test.failPath {
+					http.Error(w, "lookup failed", http.StatusNotFound)
+					return
+				}
+				if r.URL.EscapedPath() == metadataRepositoryPath {
+					_, _ = io.WriteString(w, `{"full_name":"example/project"}`)
+					return
+				}
+				t.Errorf("unexpected path %q", r.URL.EscapedPath())
+				http.NotFound(w, r)
+			}))
+			defer srv.Close()
+
+			client := New(srv.URL, "orgs/example", metadataToken)
+			_, err := client.JobMetadata(context.Background(), WaitingJob{ID: 7, RepoID: 42})
+			if !errors.Is(err, ErrMetadataUnavailable) {
+				t.Fatalf("error = %v, want ErrMetadataUnavailable", err)
+			}
+			if !strings.Contains(err.Error(), test.wantStage) {
+				t.Fatalf("error = %v, want stage %q", err, test.wantStage)
+			}
+		})
 	}
 }

@@ -88,7 +88,7 @@ func (o *Orchestrator) ExecOnWorker(ctx context.Context, instanceID, command str
 	switch n.State {
 	case StateIdle, StateBusy:
 		// OK to exec.
-	case StateProvisioning, StateDraining, StateRemoving:
+	case StateProvisioning, StateResetting, StateDraining, StateRemoving:
 		return ExecResult{}, fmt.Errorf("instance %q in state %q; exec requires idle or busy", instanceID, n.State)
 	default:
 		return ExecResult{}, fmt.Errorf("instance %q in state %q; exec requires idle or busy", instanceID, n.State)

@@ -323,7 +323,7 @@ func init() {
 // of deferred to the first Provision call when the first job lands.
 // See #26.
 func (l *Linode) Configure(ctx context.Context, tag string, node yaml.Node) error {
-	if err := node.Decode(&l.cfg); err != nil {
+	if err := provider.DecodeConfig(node, &l.cfg); err != nil {
 		return fmt.Errorf("linode: decode provider_config: %w", err)
 	}
 	if err := l.cfg.validateAll(); err != nil {
@@ -597,9 +597,13 @@ func (l *Linode) Provision(ctx context.Context, spec provider.Spec) (provider.In
 		userData = wrapped
 	}
 	booted := true
+	instanceType := spec.InstanceType
+	if instanceType == "" {
+		instanceType = l.cfg.Type
+	}
 	opts := linodego.InstanceCreateOptions{
 		Region:   l.cfg.Region,
-		Type:     l.cfg.Type,
+		Type:     instanceType,
 		Image:    l.cfg.Image,
 		Label:    spec.Name,
 		Tags:     []string{spec.Tag},

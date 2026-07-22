@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	controlv1 "github.com/hstern/fj-bellows/gen/fjbellows/control/v1"
 	"github.com/hstern/fj-bellows/gen/fjbellows/control/v1/controlv1connect"
 	"github.com/hstern/fj-bellows/internal/control/logbus"
 	"github.com/hstern/fj-bellows/internal/orchestrator"
+	"github.com/hstern/fj-bellows/internal/storage"
 )
 
 // defaultLogHistoryLines is the replay-on-connect size when a StreamLogs
@@ -43,19 +45,34 @@ func (h *apiHandler) Health(
 ) (*connect.Response[controlv1.HealthResponse], error) {
 	s := h.b.Health(ctx)
 	return connect.NewResponse(&controlv1.HealthResponse{
-		Healthy:            s.Healthy,
-		LastTickAt:         tsOrNil(s.LastTickAt),
-		LastProviderListAt: tsOrNil(s.LastProviderListAt),
-		LastForgejoPollAt:  tsOrNil(s.LastForgejoPollAt),
-		Paused:             s.Paused,
+		Healthy:                       s.Healthy,
+		LastTickAt:                    tsOrNil(s.LastTickAt),
+		LastProviderListAt:            tsOrNil(s.LastProviderListAt),
+		LastForgejoPollAt:             tsOrNil(s.LastForgejoPollAt),
+		Paused:                        s.Paused,
+		DatabaseHealthy:               s.DatabaseHealthy,
+		DatabaseLastSuccessfulWriteAt: tsOrNil(s.DatabaseLastSuccessfulWrite),
+		DatabaseLastError:             s.DatabaseLastError,
+		RoutingHealthy:                s.RoutingHealthy,
+		RoutingLastPollAt:             tsOrNil(s.RoutingLastPollAt),
+		RoutingLastDecisionAt:         tsOrNil(s.RoutingLastDecisionAt),
+		RoutingLastError:              s.RoutingLastError,
+		RoutingDegradedPricing:        s.RoutingDegradedPricing,
 	}), nil
 }
 
 func (h *apiHandler) ListWorkers(
 	_ context.Context,
-	_ *connect.Request[controlv1.ListWorkersRequest],
+	req *connect.Request[controlv1.ListWorkersRequest],
 ) (*connect.Response[controlv1.ListWorkersResponse], error) {
 	view := h.b.PoolSnapshot()
+	if selector, ok := h.b.(interface {
+		PoolSnapshotFiltered(tier, provider string) []WorkerView
+	}); ok {
+		view = selector.PoolSnapshotFiltered(req.Msg.Tier, req.Msg.Provider)
+	} else {
+		view = filterWorkerViews(view, req.Msg.Tier, req.Msg.Provider)
+	}
 	workers := make([]*controlv1.Worker, 0, len(view))
 	for _, w := range view {
 		workers = append(workers, &controlv1.Worker{
@@ -69,6 +86,9 @@ func (h *apiHandler) ListWorkers(
 			PaidHourEndAt:  tsOrNil(w.PaidHourEndAt),
 			ReapEligibleAt: tsOrNil(w.ReapEligibleAt),
 			BillingModel:   w.BillingModel,
+			Tier:           w.Tier,
+			Provider:       w.ProviderName,
+			Driver:         w.Driver,
 		})
 	}
 	return connect.NewResponse(&controlv1.ListWorkersResponse{Workers: workers}), nil
@@ -76,9 +96,14 @@ func (h *apiHandler) ListWorkers(
 
 func (h *apiHandler) GetCache(
 	ctx context.Context,
-	_ *connect.Request[controlv1.GetCacheRequest],
+	req *connect.Request[controlv1.GetCacheRequest],
 ) (*connect.Response[controlv1.GetCacheResponse], error) {
 	s := h.b.CacheStatus(ctx)
+	if selector, ok := h.b.(interface {
+		CacheStatusFor(context.Context, string) *CacheStatus
+	}); ok {
+		s = selector.CacheStatusFor(ctx, req.Msg.Provider)
+	}
 	if s == nil {
 		return connect.NewResponse(&controlv1.GetCacheResponse{Present: false}), nil
 	}
@@ -118,7 +143,7 @@ func (h *apiHandler) Reconcile(
 
 func (h *apiHandler) StreamEvents(
 	ctx context.Context,
-	_ *connect.Request[controlv1.StreamEventsRequest],
+	req *connect.Request[controlv1.StreamEventsRequest],
 	stream *connect.ServerStream[controlv1.StreamEventsResponse],
 ) error {
 	ch, cancel := h.b.Subscribe()
@@ -142,6 +167,12 @@ func (h *apiHandler) StreamEvents(
 				// Bus dropped us for slow consumption.
 				return connect.NewError(connect.CodeResourceExhausted,
 					errors.New("stream subscriber dropped: client too slow"))
+			}
+			if req.Msg.Tier != "" && ev.Attrs["tier"] != req.Msg.Tier {
+				continue
+			}
+			if req.Msg.Provider != "" && ev.Attrs["provider"] != req.Msg.Provider {
+				continue
 			}
 			if err := stream.Send(&controlv1.StreamEventsResponse{
 				At:    tsOrNil(ev.At),
@@ -222,9 +253,14 @@ func logRecordToResponse(r logbus.Record) *controlv1.StreamLogsResponse {
 
 func (h *apiHandler) ProviderInfo(
 	ctx context.Context,
-	_ *connect.Request[controlv1.ProviderInfoRequest],
+	req *connect.Request[controlv1.ProviderInfoRequest],
 ) (*connect.Response[controlv1.ProviderInfoResponse], error) {
 	name, info := h.b.ProviderInfo(ctx)
+	if selector, ok := h.b.(interface {
+		ProviderInfoFor(context.Context, string) (string, map[string]string)
+	}); ok {
+		name, info = selector.ProviderInfoFor(ctx, req.Msg.Provider)
+	}
 	// Nil maps marshal to an empty proto map; defensively normalise so
 	// the wire form is always present and clients don't have to nil-
 	// check Info themselves.
@@ -249,7 +285,15 @@ func (h *apiHandler) ForceReap(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("instance_id is required"))
 	}
 	ctx = orchestrator.WithAuditCaller(ctx, auditCaller(req))
-	if err := h.b.ForceReap(ctx, id); err != nil {
+	var err error
+	if selector, ok := h.b.(interface {
+		ForceReapIn(context.Context, string, string) error
+	}); ok {
+		err = selector.ForceReapIn(ctx, req.Msg.Tier, id)
+	} else {
+		err = h.b.ForceReap(ctx, id)
+	}
+	if err != nil {
 		// "not in pool" is a 4xx (the operator named something that
 		// doesn't exist); other failures are 5xx.
 		if strings.Contains(err.Error(), "not in pool") || strings.Contains(err.Error(), "vanished from pool") {
@@ -276,8 +320,6 @@ func (h *apiHandler) GetConfig(
 // (FailedPrecondition vs Internal); extracting a helper would have to take
 // the error mapper as a func, which is more boilerplate than the duplication
 // it removes.
-//
-//nolint:dupl // see comment above
 func (h *apiHandler) ReloadConfig(
 	ctx context.Context,
 	req *connect.Request[controlv1.ReloadConfigRequest],
@@ -301,7 +343,6 @@ func (h *apiHandler) ReloadConfig(
 	}), nil
 }
 
-//nolint:dupl // mirrors ReloadConfig by design; see comment on that function.
 func (h *apiHandler) ForceProvision(
 	ctx context.Context,
 	req *connect.Request[controlv1.ForceProvisionRequest],
@@ -310,7 +351,15 @@ func (h *apiHandler) ForceProvision(
 		return nil, connect.NewError(connect.CodePermissionDenied, errWritesDisabled)
 	}
 	ctx = orchestrator.WithAuditCaller(ctx, auditCaller(req))
-	id, err := h.b.ForceProvision(ctx)
+	var id string
+	var err error
+	if selector, ok := h.b.(interface {
+		ForceProvisionIn(context.Context, string) (string, error)
+	}); ok {
+		id, err = selector.ForceProvisionIn(ctx, req.Msg.Tier)
+	} else {
+		id, err = h.b.ForceProvision(ctx)
+	}
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -365,7 +414,17 @@ func (h *apiHandler) ExecOnWorker(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("command too long"))
 	}
 	ctx = orchestrator.WithAuditCaller(ctx, auditCaller(req))
-	stdout, stderr, exitCode, truncStdout, truncStderr, err := h.b.ExecOnWorker(ctx, id, cmd)
+	var stdout, stderr []byte
+	var exitCode int32
+	var truncStdout, truncStderr int64
+	var err error
+	if selector, ok := h.b.(interface {
+		ExecOnWorkerIn(context.Context, string, string, string) ([]byte, []byte, int32, int64, int64, error)
+	}); ok {
+		stdout, stderr, exitCode, truncStdout, truncStderr, err = selector.ExecOnWorkerIn(ctx, req.Msg.Tier, id, cmd)
+	} else {
+		stdout, stderr, exitCode, truncStdout, truncStderr, err = h.b.ExecOnWorker(ctx, id, cmd)
+	}
 	if err != nil {
 		// "not in pool" / "vanished from pool" → CodeNotFound.
 		// "exec is not supported" (docker provider) → CodeUnimplemented.
@@ -391,6 +450,182 @@ func (h *apiHandler) ExecOnWorker(
 		TruncatedStdout: truncStdout,
 		TruncatedStderr: truncStderr,
 	}), nil
+}
+
+func (h *apiHandler) JobHistory(
+	ctx context.Context,
+	req *connect.Request[controlv1.JobHistoryRequest],
+) (*connect.Response[controlv1.JobHistoryResponse], error) {
+	reporter, ok := h.b.(interface {
+		JobHistory(context.Context, storage.HistoryFilter) (storage.JobPage, error)
+	})
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("durable job history is unavailable"))
+	}
+	from, err := validProtoTime(req.Msg.From)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	to, err := validProtoTime(req.Msg.To)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	page, err := reporter.JobHistory(ctx, storage.HistoryFilter{
+		From: from, To: to, Tier: req.Msg.Tier, Provider: req.Msg.Provider,
+		Repository: req.Msg.Repository, Workflow: req.Msg.Workflow,
+		Status: storage.JobStatus(req.Msg.Status), Limit: int(req.Msg.Limit), Cursor: req.Msg.Cursor,
+	})
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	jobs := make([]*controlv1.Job, 0, len(page.Jobs))
+	for _, job := range page.Jobs {
+		jobs = append(jobs, jobToProto(job))
+	}
+	return connect.NewResponse(&controlv1.JobHistoryResponse{Jobs: jobs, NextCursor: page.NextCursor}), nil
+}
+
+func (h *apiHandler) Statistics(
+	ctx context.Context,
+	req *connect.Request[controlv1.StatisticsRequest],
+) (*connect.Response[controlv1.StatisticsResponse], error) {
+	reporter, ok := h.b.(interface {
+		Statistics(context.Context, storage.StatisticsFilter) (storage.Statistics, error)
+	})
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("durable statistics are unavailable"))
+	}
+	from, err := validProtoTime(req.Msg.From)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	to, err := validProtoTime(req.Msg.To)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	stats, err := reporter.Statistics(ctx, storage.StatisticsFilter{
+		From: from, To: to, Tier: req.Msg.Tier, Provider: req.Msg.Provider,
+		Repository: req.Msg.Repository, Workflow: req.Msg.Workflow,
+		Route:   req.Msg.Route,
+		GroupBy: storage.StatisticsGroupBy(req.Msg.GroupBy),
+	})
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	response := &controlv1.StatisticsResponse{
+		Groups:       make([]*controlv1.StatisticsGroup, 0, len(stats.Groups)),
+		FleetCosts:   make([]*controlv1.FleetCostTotal, 0, len(stats.FleetCosts)),
+		FleetTimings: make([]*controlv1.FleetTimingTotal, 0, len(stats.FleetTimings)),
+		RoutingEffectiveness: make(
+			[]*controlv1.RoutingEffectiveness, 0, len(stats.Routing),
+		),
+	}
+	for _, group := range stats.Groups {
+		response.Groups = append(response.Groups, statisticsGroupToProto(group))
+	}
+	for _, total := range stats.FleetCosts {
+		response.FleetCosts = append(response.FleetCosts, &controlv1.FleetCostTotal{
+			Tier: total.Tier, Provider: total.Provider, Day: total.Day,
+			Kind: string(total.Kind), Currency: total.Currency, Nanos: total.Nanos,
+			Entries: total.Entries, UnknownEntries: total.UnknownEntries, Estimated: total.Estimated,
+		})
+	}
+	for _, total := range stats.FleetTimings {
+		response.FleetTimings = append(response.FleetTimings, &controlv1.FleetTimingTotal{
+			Tier: total.Tier, Provider: total.Provider, Day: total.Day,
+			Kind: string(total.Kind), Duration: durationSummaryToProto(total.Duration),
+		})
+	}
+	for _, effectiveness := range stats.Routing {
+		selections := make([]*controlv1.RoutingSelection, 0, len(effectiveness.Selections))
+		for _, selection := range effectiveness.Selections {
+			selections = append(selections, &controlv1.RoutingSelection{
+				Tier: selection.Tier, Provider: selection.Provider, Jobs: selection.Jobs,
+			})
+		}
+		response.RoutingEffectiveness = append(response.RoutingEffectiveness, &controlv1.RoutingEffectiveness{
+			Route: effectiveness.Route, RequiredLabel: effectiveness.RequiredLabel,
+			Currency: effectiveness.Currency, Decisions: effectiveness.Decisions,
+			Completed: effectiveness.Completed, FallbackDecisions: effectiveness.FallbackDecisions,
+			HistoryDecisions: effectiveness.HistoryDecisions, IdleDecisions: effectiveness.IdleDecisions,
+			DeferredDecisions: effectiveness.DeferredDecisions, P95Hits: effectiveness.P95Hits,
+			P95Misses: effectiveness.P95Misses, EstimatedSelectedNanos: effectiveness.EstimatedSelectedNanos,
+			EstimatedFallbackNanos: effectiveness.EstimatedFallbackNanos,
+			EstimatedSavingsNanos:  effectiveness.EstimatedSavingsNanos,
+			ActualDirectNanos:      effectiveness.ActualDirectNanos,
+			ActualUnknownEntries:   effectiveness.ActualUnknownEntries, Selections: selections,
+		})
+	}
+	return connect.NewResponse(response), nil
+}
+
+func filterWorkerViews(workers []WorkerView, tier, provider string) []WorkerView {
+	out := make([]WorkerView, 0, len(workers))
+	for _, worker := range workers {
+		if tier != "" && worker.Tier != tier {
+			continue
+		}
+		if provider != "" && worker.ProviderName != provider {
+			continue
+		}
+		out = append(out, worker)
+	}
+	return out
+}
+
+func validProtoTime(value *timestamppb.Timestamp) (time.Time, error) {
+	if value == nil {
+		return time.Time{}, nil
+	}
+	if err := value.CheckValid(); err != nil {
+		return time.Time{}, err
+	}
+	return value.AsTime(), nil
+}
+
+func jobToProto(job storage.Job) *controlv1.Job {
+	return &controlv1.Job{
+		Id: job.ID, Source: job.Source, Handle: job.Handle, ForgejoJobId: job.ForgejoJobID,
+		Attempt: job.Attempt, RepositoryId: job.RepositoryID, Repository: job.Repository,
+		Workflow: job.Workflow, WorkflowFile: job.WorkflowFile, JobName: job.JobName,
+		IdentityQuality: string(job.IdentityQuality), Tier: job.Tier, Provider: job.Provider,
+		Driver: job.Driver, Status: string(job.Status), Conclusion: job.Conclusion,
+		InfrastructureFailure: job.InfrastructureFailure, FirstSeenAt: tsOrNil(job.FirstSeenAt),
+		QueuedAt: tsOrNil(job.QueuedAt), DispatchedAt: tsOrNil(job.DispatchedAt),
+		RunnerStartedAt: tsOrNil(job.RunnerStartedAt), RunnerFinishedAt: tsOrNil(job.RunnerFinishedAt),
+		CompletedAt: tsOrNil(job.CompletedAt),
+	}
+}
+
+func statisticsGroupToProto(group storage.StatisticsGroup) *controlv1.StatisticsGroup {
+	directCosts := make([]*controlv1.CostTotal, 0, len(group.DirectCosts))
+	for _, total := range group.DirectCosts {
+		directCosts = append(directCosts, &controlv1.CostTotal{
+			Kind: string(total.Kind), Currency: total.Currency, Nanos: total.Nanos,
+			Entries: total.Entries, UnknownEntries: total.UnknownEntries, Estimated: total.Estimated,
+		})
+	}
+	return &controlv1.StatisticsGroup{
+		Key: &controlv1.StatisticsKey{
+			Source: group.Key.Source, RepositoryId: group.Key.RepositoryID,
+			Repository: group.Key.Repository, Workflow: group.Key.Workflow,
+			Tier: group.Key.Tier, Provider: group.Key.Provider, Day: group.Key.Day,
+		},
+		Jobs: group.Jobs, Completed: group.Completed, Succeeded: group.Succeeded,
+		Failed: group.Failed, Cancelled: group.Cancelled, Skipped: group.Skipped,
+		InfraFailed: group.InfraFailed, Interrupted: group.Interrupted,
+		InProgress: group.InProgress, PricedJobs: group.PricedJobs,
+		UnpricedJobs: group.UnpricedJobs, QueueDuration: durationSummaryToProto(group.QueueDuration),
+		DispatchDuration: durationSummaryToProto(group.DispatchDuration),
+		RunDuration:      durationSummaryToProto(group.RunDuration), DirectCosts: directCosts,
+	}
+}
+
+func durationSummaryToProto(summary storage.DurationSummary) *controlv1.DurationSummary {
+	return &controlv1.DurationSummary{
+		Count: summary.Count, Total: durationpb.New(summary.Total), Min: durationpb.New(summary.Min),
+		Max: durationpb.New(summary.Max), P50: durationpb.New(summary.P50), P95: durationpb.New(summary.P95),
+	}
 }
 
 // auditCaller builds a short, log-safe identity string from the Connect

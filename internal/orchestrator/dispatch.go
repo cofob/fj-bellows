@@ -41,6 +41,13 @@ type HostKeyPinner interface {
 	PinHostKey(ip string, key ssh.PublicKey)
 }
 
+// ImagePreparer is the optional SSH-like capability needed by the managed
+// image builder. It synchronously scrubs per-machine identity and flushes the
+// disk; the provider powers the builder off after this method returns.
+type ImagePreparer interface {
+	PrepareImage(ctx context.Context, id, addr string) error
+}
+
 // SSHDispatcher dispatches jobs over SSH using an in-process client.
 type SSHDispatcher struct {
 	User        string
@@ -112,6 +119,30 @@ func (d *SSHDispatcher) WaitReady(ctx context.Context, _, addr string) error {
 		}
 	}
 	return fmt.Errorf("worker %s not ready within %s: %w", addr, d.ReadyWait, lastErr)
+}
+
+// PrepareImage synchronously scrubs a ready builder and flushes all changes to
+// disk. The existing SSH session survives removal of host identity and
+// authorized_keys, so runRemote can report completion before the provider
+// powers the allocation off and snapshots it. No background process or timing
+// assumption is involved in the credential-removal boundary.
+func (d *SSHDispatcher) PrepareImage(ctx context.Context, _, addr string) error {
+	client, err := d.dial(ctx, addr)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+	if err := runRemote(ctx, client, imageSysprepCommand(), nil); err != nil {
+		return fmt.Errorf("prepare image: %w", err)
+	}
+	return nil
+}
+
+func imageSysprepCommand() string {
+	return "set -eu; cloud-init clean --logs --machine-id; " +
+		"rm -f /run/fj-bellows-ready /tmp/tok /tmp/runner-cfg.yml /etc/fjbagent/auth.token /etc/default/fjbagent; " +
+		"rm -f /etc/ssh/ssh_host_* /root/.ssh/authorized_keys; " +
+		"find /var/log -type f -exec truncate -s 0 {} \\;; sync"
 }
 
 // RunJob delivers the token and runs one-job to completion.

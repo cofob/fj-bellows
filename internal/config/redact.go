@@ -1,6 +1,7 @@
 package config
 
 import (
+	"maps"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -40,7 +41,7 @@ var secretKeyNames = map[string]struct{}{
 //   - Forgejo.Token — the admin token used to poll the queue. The
 //     redacted copy keeps the field present so the operator can confirm
 //     it was set without seeing the value.
-//   - ProviderConfig — the opaque provider blob, walked recursively. Any
+//   - every named provider Config — opaque provider blobs walked recursively. Any
 //     mapping value whose key matches one of secretKeyNames is replaced
 //     with "<redacted>". Non-secret keys (region, type, image, IDs,
 //     CIDRs, …) pass through unchanged.
@@ -55,7 +56,23 @@ func Redact(cfg *Config) *Config {
 	if out.Forgejo.Token != "" {
 		out.Forgejo.Token = redactedMarker
 	}
-	out.ProviderConfig = redactNode(cfg.ProviderConfig)
+	out.Providers = make(map[string]ProviderInstance, len(cfg.Providers))
+	for name, p := range cfg.Providers {
+		p.Config = redactNode(p.Config)
+		out.Providers[name] = p
+	}
+	out.Tiers = make(map[string]Tier, len(cfg.Tiers))
+	for name, tier := range cfg.Tiers {
+		tier.Labels = append([]string(nil), tier.Labels...)
+		out.Tiers[name] = tier
+	}
+	out.Routing.ExchangeRates = make(map[string]string, len(cfg.Routing.ExchangeRates))
+	maps.Copy(out.Routing.ExchangeRates, cfg.Routing.ExchangeRates)
+	out.Routing.Routes = make(map[string]Route, len(cfg.Routing.Routes))
+	for name, route := range cfg.Routing.Routes {
+		route.Candidates = append([]string(nil), route.Candidates...)
+		out.Routing.Routes[name] = route
+	}
 	return &out
 }
 

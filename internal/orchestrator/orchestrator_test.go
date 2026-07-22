@@ -16,7 +16,8 @@ import (
 )
 
 const (
-	labelUbuntu = "ubuntu-latest"
+	labelUbuntu      = "ubuntu-latest"
+	testCostCurrency = "EUR"
 	// testIP is a stand-in worker IP used across orchestrator tests. Kept
 	// in one place to satisfy goconst.
 	testIP = "10.0.0.5"

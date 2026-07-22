@@ -2,23 +2,32 @@
 
 The local-Docker implementation of `provider.Provider`. It talks to the local
 Docker daemon by shelling out to the `docker` CLI — it does **not** import any
-`github.com/docker/...` Go package. The earlier SDK-based attempt (closed PR #14)
-tripped govulncheck (`GO-2026-4887`, unfixable) and pulled a large dependency
-tree; CLI shell-out (issue #15, Option A) avoids both.
+`github.com/docker/...` Go package. This keeps the module graph small and lets
+unit tests use a narrow in-memory CLI fake without a Docker daemon.
 
 The orchestrator host therefore needs the `docker` binary on `PATH` (or an
 absolute path supplied via `docker_bin`).
 
-`provider_config` shape:
+Named-provider configuration:
 
 ```yaml
-provider_config:
-  image: example/worker:latest   # required; must ship forgejo-runner on PATH
-  network: my-network            # optional; --network passed to docker run
-  docker_bin: docker             # optional; default "docker"
-  wait_timeout: 30s              # optional; bounds WaitReady polling
-  volumes:                       # optional; one -v <host>:<container>[:mode] per entry
-    - /var/run/docker.sock:/var/run/docker.sock
+providers:
+  local:
+    driver: docker
+    config:
+      image: example/worker:latest
+      network: my-network
+      docker_bin: docker
+      wait_timeout: 30s
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+
+tiers:
+  local:
+    required_label: ci-local
+    provider: local
+    instance_type: local
+    max_instances: 2
 ```
 
 Mounting the host Docker socket via `volumes` is the standard way to let
@@ -57,7 +66,7 @@ The image MUST:
 ## Dispatch
 
 A docker-exec dispatcher (`ExecDispatcher`) lives in this package and is
-selected by the composition root when `provider: docker`. It implements
+selected by the composition root when a named provider uses `driver: docker`. It implements
 `orchestrator.Dispatcher` but deliberately does NOT implement `HostKeyPinner`
 (that capability is SSH-specific).
 
@@ -85,7 +94,7 @@ RPC against a docker-backed daemon returns:
 | Key | Meaning |
 |---|---|
 | `docker_bin` | resolved docker binary (defaulted in Configure) |
-| `image` | worker image from `provider_config.image` |
+| `image` | worker image from the named provider's `config.image` |
 | `network` | optional `--network` arg, empty when none |
 | `wait_timeout` | Go-duration string the dispatcher polls with |
 

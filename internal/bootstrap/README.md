@@ -2,6 +2,10 @@
 
 Renders the **provider-agnostic** cloud-init that prepares a worker VM. The
 template (`cloud-init.yaml.tmpl`) is embedded at build time with `//go:embed`.
+`SnapshotContractMarker` hashes that template, the embedded service unit, and
+a build-embedded compatibility epoch shared with image sysprep. Managed-image
+fingerprints therefore rotate when static bootstrap inputs or the sysprep
+contract change.
 
 The bootstrap deliberately holds **no Forgejo credentials**: it installs Docker
 and the `forgejo-runner` binary, then touches a readiness sentinel

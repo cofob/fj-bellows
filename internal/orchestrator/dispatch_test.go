@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -83,6 +84,23 @@ func TestTOFUHostKeyCallback(t *testing.T) {
 // Verify SSHDispatcher satisfies the HostKeyPinner interface.
 var _ HostKeyPinner = (*SSHDispatcher)(nil)
 
+func TestImageSysprepCommandIsSynchronousAndDoesNotPowerOff(t *testing.T) {
+	cmd := imageSysprepCommand()
+	for _, required := range []string{
+		"set -eu", "cloud-init clean --logs --machine-id", "/etc/fjbagent/auth.token",
+		"/etc/ssh/ssh_host_*", "/root/.ssh/authorized_keys", "truncate -s 0", "sync",
+	} {
+		if !strings.Contains(cmd, required) {
+			t.Errorf("sysprep command missing %q: %s", required, cmd)
+		}
+	}
+	for _, forbidden := range []string{"nohup", "sleep", "poweroff", "shutdown", " &"} {
+		if strings.Contains(cmd, forbidden) {
+			t.Errorf("sysprep command contains asynchronous/provider-owned operation %q: %s", forbidden, cmd)
+		}
+	}
+}
+
 // hostInternal is the generic placeholder used across parse/hosts-override
 // tests. Kept as a const so goconst doesn't flag the repeated literal.
 const hostInternal = "forgejo.internal"
@@ -99,7 +117,7 @@ func TestParseForgejoURL(t *testing.T) {
 		{in: "http://" + hostInternal, wantHost: hostInternal, wantPort: 80},
 		{in: "http://localhost:3000", wantHost: "localhost", wantPort: 3000},
 		{in: "https://" + hostInternal + ":8443/", wantHost: hostInternal, wantPort: 8443},
-		{in: "http://192.0.2.10:8080", wantHost: "192.0.2.10", wantPort: 8080, wantIPLit: true},
+		{in: "http://" + fleetShortIP + ":8080", wantHost: fleetShortIP, wantPort: 8080, wantIPLit: true},
 		{in: "https://[2001:db8::1]:8443", wantHost: "2001:db8::1", wantPort: 8443, wantIPLit: true},
 		{in: "ftp://" + hostInternal, wantErr: true}, // unsupported scheme
 		{in: "https://", wantErr: true},              // no host
@@ -154,7 +172,7 @@ func TestHostsOverrideCommand(t *testing.T) {
 		},
 		{
 			name: "IPv4 literal needs no DNS",
-			in:   forgejoTarget{host: "192.0.2.10", port: 8080, isIPLit: true},
+			in:   forgejoTarget{host: fleetShortIP, port: 8080, isIPLit: true},
 			want: "",
 		},
 		{
@@ -190,7 +208,7 @@ func TestRunnerConfigYAML(t *testing.T) {
 		},
 		{
 			name: "IPv4 literal: minimal config with just docker_host (no host-override possible; documented limitation)",
-			in:   forgejoTarget{host: "192.0.2.10", port: 8080, isIPLit: true},
+			in:   forgejoTarget{host: fleetShortIP, port: 8080, isIPLit: true},
 			want: "container:\n  docker_host: automount\n",
 		},
 		{

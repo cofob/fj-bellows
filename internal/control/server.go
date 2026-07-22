@@ -18,6 +18,7 @@ import (
 //   - ConnectRPC handlers (Connect/JSON, gRPC, gRPC-Web) at /<package>.<Service>/<Method>
 //   - Plain HTTP /healthz so k8s probes and `curl --fail` work without Connect
 //   - Plain HTTP /metrics for Prometheus scrape
+//   - Read-only /dashboard/ UI with a bearer-protected JSON snapshot
 type Server struct {
 	listen  string
 	srv     *http.Server
@@ -75,6 +76,12 @@ func NewServer(listen string, backend Backend, log *slog.Logger, opts ...Option)
 
 	m := newMetrics(backend, time.Now)
 	mux.Handle("/metrics", m.handler())
+	dashboard := newDashboardHandler(backend, time.Now)
+	mux.Handle("/dashboard", dashboard)
+	mux.Handle("/dashboard/", dashboard)
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/dashboard/", http.StatusTemporaryRedirect)
+	})
 
 	// Enable HTTP/2 cleartext so gRPC clients can speak h2c over the
 	// loopback-bound socket. Connect/JSON over HTTP/1.1 still works.

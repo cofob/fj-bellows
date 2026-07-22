@@ -16,7 +16,10 @@ func TestMetrics_ExposesPulledGauges(t *testing.T) {
 	now := time.Now()
 	be := &mockctl.Backend{}
 	be.SetHealth(func(context.Context) control.HealthStatus {
-		return control.HealthStatus{Healthy: true, LastTickAt: now.Add(-2 * time.Second)}
+		return control.HealthStatus{
+			Healthy: true, LastTickAt: now.Add(-2 * time.Second),
+			RoutingHealthy: true, RoutingLastPollAt: now.Add(-time.Second),
+		}
 	})
 	const stateIdle, stateBusy = "idle", "busy"
 	be.SetPoolSnapshot(func() []control.WorkerView {
@@ -39,6 +42,8 @@ func TestMetrics_ExposesPulledGauges(t *testing.T) {
 	mustContain(t, body, `fjb_workers{state="busy"} 2`)
 	mustContain(t, body, `fjb_workers{state="provisioning"} 0`) // pre-seeded
 	mustContain(t, body, `fjb_cache_present 1`)
+	mustContain(t, body, `fjb_routing_healthy 1`)
+	mustContain(t, body, `fjb_routing_pricing_degraded 0`)
 }
 
 func TestMetrics_LastTickAge_NegativeBeforeFirstTick(t *testing.T) {

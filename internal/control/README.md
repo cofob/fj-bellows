@@ -5,7 +5,7 @@ Operator-facing control plane for the running fj-bellows daemon.
 ## What it serves
 
 One TCP listener (default `127.0.0.1:9876`, override with `-control-listen`)
-multiplexes three protocols on a single mux:
+multiplexes these surfaces on a single mux:
 
 - **ConnectRPC** at `/<package>.<Service>/<Method>`, speaking Connect/JSON,
   gRPC, and gRPC-Web. The service is `fjbellows.control.v1.ControlService`
@@ -13,6 +13,10 @@ multiplexes three protocols on a single mux:
 - **`/healthz`** — plain HTTP shim for k8s-style liveness/readiness probes and
   `curl --fail`. Returns 200 + tiny JSON when healthy, 503 otherwise.
 - **`/metrics`** — Prometheus exposition (added in a later PR).
+- **`/dashboard/`** — embedded read-only web UI for live VM/task/queue state,
+  P95 timings, costs, and automatic-routing effectiveness. Its JSON endpoint is
+  `/dashboard/api`; `/dashboard/ws` forwards the existing bounded fleet event
+  stream so state changes refresh immediately while polling remains a fallback.
 
 HTTP/2 cleartext (`UnencryptedHTTP2`) is enabled so gRPC clients work over the
 loopback-bound socket without TLS.
@@ -57,9 +61,17 @@ Connect RPCs then require the header on every request:
 Authorization: Bearer <contents of token file>
 ```
 
-`/healthz` and `/metrics` stay open regardless — Prom scrapers and k8s
+`/healthz`, `/metrics`, and the data-free dashboard HTML/CSS/JS shell stay open
+regardless — Prom scrapers and k8s
 liveness probes can't reasonably carry per-request bearer creds, and what
 they expose isn't sensitive enough to gate.
+
+`/dashboard/api` does carry fleet data and requires the same bearer token as
+Connect RPCs. The UI prompts for it and keeps it in `sessionStorage`, so it is
+discarded with the browser tab rather than persisted in local storage.
+`/dashboard/ws` uses the same token encoded in the `fjb-bearer.<base64url>`
+WebSocket subprotocol, avoiding credentials in query strings and access logs;
+the server selects the separate `fjb-events-v1` application subprotocol.
 
 Sample bind for a tailscale-exposed daemon:
 

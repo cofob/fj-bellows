@@ -2,6 +2,7 @@ package provider_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -46,5 +47,36 @@ func TestBillingModelString(t *testing.T) {
 		if got := m.String(); got != want {
 			t.Errorf("%d.String() = %q, want %q", m, got, want)
 		}
+	}
+}
+
+func TestDecodeConfigUsesKnownFieldsRecursively(t *testing.T) {
+	type nested struct {
+		Enabled bool `yaml:"enabled"`
+	}
+	type providerConfig struct {
+		Token  string `yaml:"token"`
+		Nested nested `yaml:"nested"`
+	}
+
+	var validNode yaml.Node
+	if err := yaml.Unmarshal([]byte("token: test\nnested: {enabled: true}\n"), &validNode); err != nil {
+		t.Fatal(err)
+	}
+	var got providerConfig
+	if err := provider.DecodeConfig(validNode, &got); err != nil {
+		t.Fatalf("DecodeConfig valid node: %v", err)
+	}
+	if got.Token != "test" || !got.Nested.Enabled {
+		t.Fatalf("DecodeConfig = %#v", got)
+	}
+
+	var unknownNode yaml.Node
+	if err := yaml.Unmarshal([]byte("token: test\nnested: {enabeld: true}\n"), &unknownNode); err != nil {
+		t.Fatal(err)
+	}
+	err := provider.DecodeConfig(unknownNode, &got)
+	if err == nil || !strings.Contains(err.Error(), "enabeld") {
+		t.Fatalf("DecodeConfig error = %v, want unknown nested field", err)
 	}
 }

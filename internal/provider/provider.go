@@ -43,9 +43,93 @@ func (b BillingModel) String() string {
 type Spec struct {
 	Tag           string   // stamped for reconcile + orphan sweep
 	Name          string   // unique instance label
+	Role          string   // worker by default; builder resources stay out of List
+	InstanceType  string   // provider machine/size slug selected by the tier
+	ImageID       string   // optional provider image/snapshot override
 	UserData      string   // rendered cloud-init (plain text; provider encodes as needed)
 	AuthorizedKey string   // SSH public key (authorized_keys line) for the orchestrator
 	Labels        []string // Forgejo runner labels this VM will serve
+}
+
+// ResetSpec describes an in-place rebuild of an existing worker. Providers
+// that can return a server to a clean managed image implement Resetter. The
+// server allocation (and therefore its billing anchor) remains the same.
+type ResetSpec struct {
+	ImageID       string
+	UserData      string
+	AuthorizedKey string
+}
+
+// Resetter is an optional provider capability used by one-job tiers that can
+// rebuild an existing allocation instead of deleting it.
+type Resetter interface {
+	Reset(ctx context.Context, id string, spec ResetSpec) (Instance, error)
+}
+
+// ManagedImage is the provider-neutral view of an owned golden image.
+type ManagedImage struct {
+	ID          string
+	Name        string
+	Fingerprint string
+	CreatedAt   time.Time
+	SizeBytes   int64
+}
+
+// ImageSpec describes a snapshot captured from a fully prepared builder.
+type ImageSpec struct {
+	Tag              string
+	Name             string
+	SourceInstanceID string
+	Fingerprint      string
+}
+
+// ManagedImageProvider is an optional provider capability used to build,
+// discover, rotate, and remove daemon-owned golden images.
+type ManagedImageProvider interface {
+	CreateImage(ctx context.Context, spec ImageSpec) (ManagedImage, error)
+	DeleteImage(ctx context.Context, id string) error
+	ListImages(ctx context.Context, tag string) ([]ManagedImage, error)
+}
+
+// BuilderProvider exposes daemon-owned image-builder VMs separately from
+// normal workers. Builders are intentionally absent from Provider.List so
+// they cannot be dispatched, but the core still needs cloud truth to reap a
+// builder left behind by a process crash.
+type BuilderProvider interface {
+	ListBuilders(ctx context.Context, tag string) ([]Instance, error)
+}
+
+// BuilderPromoter atomically changes an owned image-builder allocation into
+// a normal worker allocation. Snapshot-reset tiers use it after capturing the
+// first golden image so the already-paid builder VM can be rebuilt in place
+// and serve the waiting job instead of being deleted and replaced by a second
+// allocation. The durable generation is marked unclean before promotion, so a
+// crash in the hand-off can only cause the promoted VM to be drained. The
+// provider must verify id belongs to the exact supplied ownership tag before
+// changing its role.
+type BuilderPromoter interface {
+	PromoteBuilder(ctx context.Context, id, tag string) error
+}
+
+// PriceQuote is an immutable list-price observation. Monetary values are
+// integer nanounits of Currency so accounting never depends on float64.
+type PriceQuote struct {
+	InstanceType         string
+	Currency             string
+	PerHourNanos         int64
+	PerMonthNanos        int64
+	BillingQuantum       time.Duration
+	MinimumDuration      time.Duration
+	MinimumChargeNanos   int64
+	SnapshotGBMonthNanos int64
+	Source               string
+	ObservedAt           time.Time
+}
+
+// Pricer is an optional provider capability. A missing quote never prevents
+// provisioning; callers record the resource as unpriced instead.
+type Pricer interface {
+	Quote(ctx context.Context, instanceType string) (PriceQuote, error)
 }
 
 // Instance is the provider's view of a running VM. CreatedAt comes from the

@@ -14,12 +14,35 @@ package forgejo
 // Forgejo 12 instances; the orchestrator falls back to the job ID as a stable
 // per-job key when Handle is empty.
 type WaitingJob struct {
-	ID     int64    `json:"id"`
-	Handle string   `json:"handle"`
-	Labels []string `json:"runs_on"`
-	Status string   `json:"status"`
-	TaskID int64    `json:"task_id"`
-	Name   string   `json:"name"`
+	ID         int64    `json:"id"`
+	Attempt    int64    `json:"attempt"`
+	Handle     string   `json:"handle"`
+	RepoID     int64    `json:"repo_id"`
+	OwnerID    int64    `json:"owner_id"`
+	RunID      int64    `json:"run_id"`
+	WorkflowID string   `json:"workflow_id"`
+	CommitSHA  string   `json:"commit_sha"`
+	Labels     []string `json:"runs_on"`
+	Status     string   `json:"status"`
+	TaskID     int64    `json:"task_id"`
+	Name       string   `json:"name"`
+}
+
+// JobMetadata is optional repository/workflow enrichment. Older Forgejo
+// versions may not expose the lookup endpoints; callers retain queue data and
+// mark fallback identity rather than delaying dispatch.
+type JobMetadata struct {
+	Repository  string
+	WorkflowID  string
+	RunID       int64
+	Ref         string
+	Event       string
+	CommitSHA   string
+	Status      string
+	Conclusion  string
+	QueuedAt    string
+	StartedAt   string
+	CompletedAt string
 }
 
 // Registration is the result of registering an ephemeral runner.

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	controlv1 "github.com/hstern/fj-bellows/gen/fjbellows/control/v1"
 	"github.com/hstern/fj-bellows/internal/control"
 	mockctl "github.com/hstern/fj-bellows/internal/control/mock"
 )
@@ -68,10 +69,14 @@ func TestHealth_Human_PrintsHealthyAndAges(t *testing.T) {
 	be := &mockctl.Backend{}
 	be.SetHealth(func(context.Context) control.HealthStatus {
 		return control.HealthStatus{
-			Healthy:            true,
-			LastTickAt:         now.Add(-2 * time.Second),
-			LastProviderListAt: now.Add(-3 * time.Second),
-			LastForgejoPollAt:  now.Add(-4 * time.Second),
+			Healthy:                     true,
+			LastTickAt:                  now.Add(-2 * time.Second),
+			LastProviderListAt:          now.Add(-3 * time.Second),
+			LastForgejoPollAt:           now.Add(-4 * time.Second),
+			DatabaseHealthy:             true,
+			DatabaseLastSuccessfulWrite: now.Add(-time.Second),
+			RoutingHealthy:              true,
+			RoutingLastPollAt:           now.Add(-time.Second),
 		}
 	})
 	be.SetPoolSnapshot(func() []control.WorkerView { return nil })
@@ -87,6 +92,39 @@ func TestHealth_Human_PrintsHealthyAndAges(t *testing.T) {
 	}
 	if !strings.Contains(out, "last_tick") {
 		t.Fatalf("missing last_tick line:\n%s", out)
+	}
+	for _, want := range []string{
+		"database            HEALTHY", "database_last_write", "database_last_error -",
+		"routing             HEALTHY", "routing_last_poll", "routing_pricing     CURRENT",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("health output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestHealth_Human_PrintsDatabaseFailure(t *testing.T) {
+	be := &mockctl.Backend{}
+	be.SetHealth(func(context.Context) control.HealthStatus {
+		return control.HealthStatus{
+			Healthy:                     false,
+			DatabaseHealthy:             false,
+			DatabaseLastSuccessfulWrite: time.Now().Add(-time.Minute),
+			DatabaseLastError:           "database is locked",
+		}
+	})
+	be.SetPoolSnapshot(func() []control.WorkerView { return nil })
+	be.SetCacheStatus(func(context.Context) *control.CacheStatus { return nil })
+
+	listen := newCLIBackedServer(t, be)
+	code, out := captureRun(t, "health", "-listen", listen)
+	if code != 1 {
+		t.Fatalf("degraded database should exit 1; got %d\n%s", code, out)
+	}
+	for _, want := range []string{"database            DEGRADED", "database_last_write", "database_last_error database is locked"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("health output missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -120,6 +158,22 @@ func TestHealth_Unhealthy_ExitsOne(t *testing.T) {
 	code, out := captureRun(t, "health", "-listen", listen)
 	if code != 1 {
 		t.Fatalf("unhealthy daemon should exit 1; got %d\n%s", code, out)
+	}
+}
+
+func TestRenderStatisticsIncludesRoutingEffectiveness(t *testing.T) {
+	var out bytes.Buffer
+	renderStatistics(&out, &controlv1.StatisticsResponse{RoutingEffectiveness: []*controlv1.RoutingEffectiveness{{
+		Route: "amd64", Currency: "USD", Decisions: 4, Completed: 3,
+		FallbackDecisions: 1, HistoryDecisions: 3, IdleDecisions: 2,
+		P95Hits: 2, P95Misses: 1, EstimatedSelectedNanos: 100_000_000,
+		EstimatedSavingsNanos: 25_000_000, ActualDirectNanos: 90_000_000,
+		Selections: []*controlv1.RoutingSelection{{Tier: "long", Provider: "hetzner", Jobs: 3}},
+	}}})
+	for _, want := range []string{"routing effectiveness", "amd64", "66.7%", "long/hetzner:3"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("routing statistics output missing %q:\n%s", want, out.String())
+		}
 	}
 }
 

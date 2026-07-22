@@ -14,12 +14,14 @@ go install github.com/hstern/fj-bellows/cmd/fjbctl@latest
 
 | Subcommand | RPC | Description |
 | --- | --- | --- |
-| `fjbctl health` | `Health` | Readiness snapshot (healthy + last-tick / last-provider-list / last-forgejo-poll ages). Exits 0 if healthy, 1 otherwise. |
+| `fjbctl health` | `Health` | Readiness snapshot for reconcile, database, automatic-route polling, and pricing fallback. Exits 0 if healthy, 1 otherwise. |
 | `fjbctl workers` | `ListWorkers` | Table of every worker the orchestrator currently tracks (state, IP, age, last_busy, current_job, billing model, reap eta). Pass `--watch` to subscribe to `StreamEvents` and redraw on every state-transition event. |
 | `fjbctl cache` | `GetCache` | Managed pull-through registry cache VM state — present/absent, Linode VM status, VPC IP, bucket region+label. |
 | `fjbctl reconcile` | `Reconcile` | Drive one synchronous reconcile tick. Prints the per-tick summary (provisioned / dispatched / reaped / adopted / dropped + any errors). Exits 1 if the response includes errors. |
 | `fjbctl events` | `StreamEvents` | Stream state-transition events (`worker_provisioned`, `job_complete`, `reconcile_tick`, …) until interrupted. The protocol-level `stream_opened` sentinel is skipped. |
 | `fjbctl info` | `ProviderInfo` | Provider's operator-debug key/value map (Linode managed-resource IDs, capacity-full counter, account balance, region/type/image; docker reports daemon socket/image/network/wait_timeout). |
+| `fjbctl jobs` | `JobHistory` | Durable job history with time, tier/provider, repository/workflow, status, and pagination filters. |
+| `fjbctl stats` | `Statistics` | Workflow/fleet timing and cost totals plus automatic-routing P95 effectiveness, selected tiers, normalized cost, and fallback savings. Use `-route` to isolate one route. |
 
 ## Common flags
 
@@ -38,6 +40,8 @@ fjbctl workers
 fjbctl cache
 fjbctl reconcile
 fjbctl info
+fjbctl jobs -since 24h
+fjbctl stats -since 720h -route amd64
 fjbctl events            # Ctrl-C to exit.
 
 # Remote daemon (tailscale, mTLS-terminated by a reverse proxy, …).

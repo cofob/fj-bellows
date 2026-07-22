@@ -87,8 +87,8 @@ func TestStreamEvents_RPC_DeliversPublishedEvents(t *testing.T) {
 		t.Fatalf("first message: want stream_opened got %q", got)
 	}
 
-	bus.Publish(events.Event{At: time.Now(), Type: "worker_provisioned", Attrs: map[string]string{"id": "vm-1"}})
-	bus.Publish(events.Event{At: time.Now(), Type: "job_complete", Attrs: map[string]string{"id": "vm-1", "handle": "h1"}})
+	bus.Publish(events.Event{At: time.Now(), Type: "worker_provisioned", Attrs: map[string]string{"id": testInstance}})
+	bus.Publish(events.Event{At: time.Now(), Type: "job_complete", Attrs: map[string]string{"id": testInstance, "handle": "h1"}})
 
 	if !stream.Receive() {
 		t.Fatalf("first Receive: %v", stream.Err())
@@ -96,7 +96,7 @@ func TestStreamEvents_RPC_DeliversPublishedEvents(t *testing.T) {
 	if got := stream.Msg().Type; got != "worker_provisioned" {
 		t.Fatalf("event 1 type: want worker_provisioned got %q", got)
 	}
-	if stream.Msg().Attrs["id"] != "vm-1" {
+	if stream.Msg().Attrs["id"] != testInstance {
 		t.Fatalf("event 1 attrs: %+v", stream.Msg().Attrs)
 	}
 

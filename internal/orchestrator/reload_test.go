@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,7 +45,6 @@ func TestApplyHotConfig_HotFieldsApplied(t *testing.T) {
 	o := New(baseCfg(), nil, nil, nil, nil)
 	next := baseCfg()
 	next.MaxScale = 8
-	next.Labels = []string{"ubuntu-latest", "macos"}
 	next.PollInterval = 30 * time.Second
 	next.RunnerVersion = "12.11.0"
 	next.DrainOnShutdown = false
@@ -59,16 +59,15 @@ func TestApplyHotConfig_HotFieldsApplied(t *testing.T) {
 		t.Fatalf("ApplyHotConfig: %v", err)
 	}
 	want := []string{
+		"billing_hour",
 		"destroy_on_exit",
 		"drain_on_shutdown",
 		"drain_timeout",
-		"forgejo.labels",
-		"poll.billing_hour",
-		"poll.hour_margin",
-		"poll.idle_timeout",
+		"hour_margin",
+		"idle_timeout",
+		"max_instances",
 		"poll.interval",
 		"runner_version",
-		"scale.max",
 	}
 	if !reflect.DeepEqual(changed, want) {
 		t.Fatalf("changed:\nwant %v\n got %v", want, changed)
@@ -77,9 +76,6 @@ func TestApplyHotConfig_HotFieldsApplied(t *testing.T) {
 	cur := o.CurrentConfig()
 	if cur.MaxScale != 8 {
 		t.Errorf("MaxScale not applied: %d", cur.MaxScale)
-	}
-	if !reflect.DeepEqual(cur.Labels, next.Labels) {
-		t.Errorf("Labels not applied: %v", cur.Labels)
 	}
 	if cur.PollInterval != 30*time.Second {
 		t.Errorf("PollInterval not applied: %s", cur.PollInterval)
@@ -103,6 +99,8 @@ func TestApplyHotConfig_RejectsNonHot(t *testing.T) {
 	next.ReadyFile = "/run/other"
 	next.AuthorizedKey = "ssh-ed25519 AAA other"
 	next.Teardown.Model = provider.BillingHourlyRoundUp
+	next.Labels = []string{"different-label"}
+	next.OneJobPerVM = !next.OneJobPerVM
 	// Mix in a hot change too: must be rejected wholesale, no partial apply.
 	next.MaxScale = 99
 
@@ -111,7 +109,7 @@ func TestApplyHotConfig_RejectsNonHot(t *testing.T) {
 		t.Fatal("expected error on non-hot field change")
 	}
 	msg := err.Error()
-	for _, want := range []string{"tag", "ready_file", "ssh.authorized_key", "billing_model"} {
+	for _, want := range []string{"tag", "ready_file", "ssh.authorized_key", "billing_model", "labels", "one_job_per_vm"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error message missing %q: %s", want, msg)
 		}
@@ -142,7 +140,9 @@ func TestHotReloadableListMatchesDiff(t *testing.T) {
 	a := baseCfg()
 	b := baseCfg()
 	b.MaxScale = a.MaxScale + 1
-	b.Labels = append([]string{"extra"}, a.Labels...)
+	b.WarmInstances = a.WarmInstances + 1
+	b.ResetMinRemaining = a.ResetMinRemaining + time.Second
+	b.ResetTimeout = a.ResetTimeout + time.Second
 	b.PollInterval = a.PollInterval + time.Second
 	b.RunnerVersion = a.RunnerVersion + "-rc1"
 	b.DrainOnShutdown = !a.DrainOnShutdown
@@ -171,4 +171,33 @@ func TestHotReloadableListMatchesDiff(t *testing.T) {
 			t.Errorf("diff surfaced %q but it is not in HotReloadable", k)
 		}
 	}
+}
+
+func TestApplyHotConfigConcurrentReaders(t *testing.T) {
+	o := New(baseCfg(), nil, nil, nil, nil)
+	o.pool.Put(&Node{InstanceID: "worker", State: StateIdle, CreatedAt: time.Now(), LastBusy: time.Now()})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := range 200 {
+			next := baseCfg()
+			next.MaxScale += i % 2
+			next.WarmInstances = i % 2
+			next.PollInterval += time.Duration(i%2) * time.Second
+			if _, err := o.ApplyHotConfig(next); err != nil {
+				t.Errorf("ApplyHotConfig: %v", err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			_ = o.CurrentConfig()
+			_ = o.PoolSnapshot()
+			_ = o.Health(t.Context())
+		}
+	}()
+	wg.Wait()
 }

@@ -93,7 +93,7 @@ func init() {
 // provider.Provider interface but the docker provider has no startup-time
 // network calls or tag-scoped resources to create — it ignores them.
 func (d *Docker) Configure(_ context.Context, _ string, node yaml.Node) error {
-	if err := node.Decode(&d.cfg); err != nil {
+	if err := provider.DecodeConfig(node, &d.cfg); err != nil {
 		return fmt.Errorf("docker: decode provider_config: %w", err)
 	}
 	if d.cfg.Image == "" {

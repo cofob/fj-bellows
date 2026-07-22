@@ -5,12 +5,18 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"os/signal"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,11 +34,15 @@ import (
 	"github.com/hstern/fj-bellows/internal/forgejo"
 	"github.com/hstern/fj-bellows/internal/orchestrator"
 	"github.com/hstern/fj-bellows/internal/provider"
+	"github.com/hstern/fj-bellows/internal/router"
+	"github.com/hstern/fj-bellows/internal/storage"
 	"github.com/hstern/fj-bellows/internal/transport/wg"
 	"github.com/hstern/fj-bellows/internal/transport/wgboot"
 
 	// Register in-tree providers.
+	_ "github.com/hstern/fj-bellows/internal/provider/digitalocean"
 	dockerprov "github.com/hstern/fj-bellows/internal/provider/docker"
+	_ "github.com/hstern/fj-bellows/internal/provider/hetzner"
 	linodeprov "github.com/hstern/fj-bellows/internal/provider/linode"
 )
 
@@ -102,6 +112,7 @@ type runOpts struct {
 // the same commit.
 var version = "dev"
 
+//nolint:gocyclo // The composition root keeps independently fallible startup stages visibly ordered.
 func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 	cfg, err := config.Load(opts.configPath)
 	if err != nil {
@@ -117,50 +128,38 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 	}
 	defer release()
 
-	// SSH key is required only for providers that dispatch over SSH. A docker
-	// deployment passes nothing into cloud-init and execs into containers.
-	signer, authKey, err := loadSSHKeyForProvider(cfg)
+	// SSH key is shared by every SSH-backed tier. Docker-only deployments do
+	// not need one.
+	signer, authKey, err := loadSSHKeyForConfig(cfg)
 	if err != nil {
 		return err
 	}
-
-	prov, err := provider.New(cfg.Provider)
-	if err != nil {
-		return err
-	}
-	applyAuthorizedKeyToLinodeProvider(prov, authKey)
-	// Propagate transport mode into the Linode provider so its managed
-	// firewall synthesizes the right ACCEPT rules (tcp/22 for legacy SSH,
-	// IPsec ports for cache-gateway). Duck-typed so providers that don't
-	// implement the method (e.g. the docker provider, which has no
-	// Linode-style firewall) are unaffected.
-	applyTransportToProvider(prov, cfg.Transport)
-	// Under cache-gateway mode, load (or generate) the orchestrator's WG
-	// keypair BEFORE Configure runs. Configure provisions the cache VM,
-	// and its cloud-init needs the orchestrator's public key baked in
-	// so wg-quick on the cache can come up referencing the right peer
-	// (FJB-99 Phase A). Phase B will move the wgboot.Boot call to AFTER
-	// Configure and have it reuse this same key.
-	if err := plumbOrchestratorWGPubkey(prov, cfg.Transport); err != nil {
-		return err
-	}
-	// Bound the Configure-time network calls (provider sentinel fetches,
-	// firewall API, etc.) so a hung upstream can't wedge startup forever.
-	cfgCtx, cancelCfg := context.WithTimeout(context.Background(), 60*time.Second)
-	if err := prov.Configure(cfgCtx, cfg.Tag, cfg.ProviderConfig); err != nil {
-		cancelCfg()
-		return err
-	}
-	cancelCfg()
-
-	// Forgejo's job-queue ?labels= filter matches the bare label a workflow
-	// declares in `runs_on`, so strip any `:scheme://image` binding before
-	// passing labels to the client. Registration and the worker's --label arg
-	// still see the full strings via the orchestrator config below. See #39.
-	fj := forgejo.New(cfg.Forgejo.URL, cfg.Forgejo.Scope, cfg.Forgejo.Token, forgejo.BareLabels(cfg.Forgejo.Labels)...)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	database, err := storage.Open(ctx, cfg.Database.Path)
+	if err != nil {
+		return fmt.Errorf("open durable database: %w", err)
+	}
+	defer func() {
+		if closeErr := database.Close(); closeErr != nil {
+			log.Error("close durable database", "err", closeErr)
+		}
+	}()
+	if err := recoverDurableState(ctx, database); err != nil {
+		return fmt.Errorf("recover durable database: %w", err)
+	}
+	startRetention(ctx, database, cfg.Database.Retention.D(), log)
+
+	providers, err := configureProviders(ctx, cfg, authKey)
+	if err != nil {
+		return err
+	}
+	transportProvider, err := providerForTransport(cfg, providers)
+	if err != nil {
+		return err
+	}
 
 	// Boot the WireGuard cache-gateway transport stack (FJB-90) BEFORE
 	// constructing the dispatcher so the cache-gateway dispatcher can
@@ -170,22 +169,51 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 	// Returns a closer that's safe to defer-call even when no stack
 	// was started (legacy ssh mode / docker provider); wgStack is nil
 	// in those cases.
-	wgStack, wgClose, err := bootWGStack(ctx, cfg, prov, log)
+	wgStack, wgClose, err := bootWGStack(ctx, cfg, transportProvider, log)
 	if err != nil {
 		return err
 	}
 	defer wgClose()
 
-	dispatcher, err := dispatcherFor(cfg, prov, signer, wgStack)
+	automaticLabels, explicitLabels := routingLabels(cfg)
+	tiers := make(map[string]*orchestrator.Orchestrator, len(cfg.Tiers))
+	for _, tierName := range cfg.TierNames() {
+		tier := cfg.Tiers[tierName]
+		providerDef := cfg.Providers[tier.Provider]
+		prov := providers[tier.Provider]
+		dispatcher, derr := dispatcherFor(cfg, providerDef.Driver, prov, signer, wgStack, tier.Labels)
+		if derr != nil {
+			return fmt.Errorf("tier %s dispatcher: %w", tierName, derr)
+		}
+		if err := validateTierCapabilities(tierName, tier, prov, dispatcher); err != nil {
+			return err
+		}
+		baseJobs := forgejo.New(cfg.Forgejo.URL, cfg.Forgejo.Scope, cfg.Forgejo.Token,
+			forgejo.BareLabels([]string{tier.RequiredLabel})...)
+		var jobs orchestrator.JobSource = baseJobs
+		if tierUsesAutomaticRouting(cfg, tierName) {
+			jobs = &router.RoutedSource{
+				Base: baseJobs, Store: database, Tier: tierName,
+				AutomaticLabels: automaticLabels, ExplicitLabels: explicitLabels,
+			}
+		}
+		orchCfg, cerr := buildOrchestratorConfig(cfg, tierName, tier, opts, version, authKey, prov)
+		if cerr != nil {
+			return fmt.Errorf("tier %s: %w", tierName, cerr)
+		}
+		orch := orchestrator.New(orchCfg, prov, jobs, dispatcher,
+			log.With("tier", tierName, "provider", tier.Provider, "driver", providerDef.Driver))
+		orch.SetStore(database)
+		tiers[tierName] = orch
+	}
+	fleet, err := orchestrator.NewFleet(tiers)
 	if err != nil {
 		return err
 	}
-
-	orchCfg, err := buildOrchestratorConfig(cfg, opts, version, authKey, prov)
+	autoRouter, err := configureAutoRouter(cfg, fleet, providers, database, log)
 	if err != nil {
 		return err
 	}
-	orch := orchestrator.New(orchCfg, prov, fj, dispatcher, log)
 
 	if err := startControlPlane(ctx, controlOpts{
 		listen:       opts.controlListen,
@@ -193,19 +221,187 @@ func run(opts runOpts, log *slog.Logger, logBus *logbus.Bus) error {
 		enableWrites: opts.enableControlWrites,
 		configPath:   opts.configPath,
 		cfg:          cfg,
-		providerName: cfg.Provider,
-	}, orch, prov, logBus, log); err != nil {
+	}, fleet, providers, database, autoRouter, logBus, log); err != nil {
 		return err
 	}
 
 	log.Info(
 		"fj-bellows starting",
-		"provider", cfg.Provider,
-		"billing", prov.BillingModel().String(),
-		"max_scale", cfg.Scale.Max,
+		"providers", len(cfg.Providers),
+		"tiers", len(cfg.Tiers),
 		"poll", cfg.Poll.Interval.D().String(),
 	)
-	return orch.Run(ctx)
+	return runFleetServices(ctx, fleet, autoRouter)
+}
+
+func validateTierCapabilities(tierName string, tier config.Tier, prov provider.Provider, dispatcher orchestrator.Dispatcher) error {
+	if tier.ResetMode != config.ResetSnapshot {
+		return nil
+	}
+	if _, ok := prov.(provider.Resetter); !ok {
+		return fmt.Errorf("tier %s: provider does not support in-place snapshot reset", tierName)
+	}
+	if _, ok := prov.(provider.ManagedImageProvider); !ok {
+		return fmt.Errorf("tier %s: provider does not support managed images", tierName)
+	}
+	if _, ok := prov.(provider.BuilderProvider); !ok {
+		return fmt.Errorf("tier %s: provider cannot list managed image builders for crash recovery", tierName)
+	}
+	if _, ok := prov.(provider.BuilderPromoter); !ok {
+		return fmt.Errorf("tier %s: provider does not support cost-effective image-builder hand-off", tierName)
+	}
+	if _, ok := dispatcher.(orchestrator.ImagePreparer); !ok {
+		return fmt.Errorf("tier %s: dispatcher does not support golden-image preparation", tierName)
+	}
+	return nil
+}
+
+func configureProviders(ctx context.Context, cfg *config.Config, authKey string) (map[string]provider.Provider, error) {
+	out := make(map[string]provider.Provider, len(cfg.Providers))
+	for name, def := range cfg.Providers {
+		prov, err := provider.New(def.Driver)
+		if err != nil {
+			return nil, fmt.Errorf("provider %s: %w", name, err)
+		}
+		applyAuthorizedKeyToLinodeProvider(prov, authKey)
+		applyTransportToProvider(prov, cfg.Transport)
+		if err := plumbOrchestratorWGPubkey(prov, cfg.Transport); err != nil {
+			return nil, fmt.Errorf("provider %s: %w", name, err)
+		}
+		cfgCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		err = prov.Configure(cfgCtx, cfg.Tag, def.Config)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("configure provider %s (%s): %w", name, def.Driver, err)
+		}
+		out[name] = prov
+	}
+	return out, nil
+}
+
+func tierUsesAutomaticRouting(cfg *config.Config, tierName string) bool {
+	for _, route := range cfg.Routing.Routes {
+		if slices.Contains(route.Candidates, tierName) {
+			return true
+		}
+	}
+	return false
+}
+
+func routingLabels(cfg *config.Config) (automatic, explicit []string) {
+	automatic = make([]string, 0, len(cfg.Routing.Routes))
+	for _, route := range cfg.Routing.Routes {
+		automatic = append(automatic, route.RequiredLabel)
+	}
+	explicit = make([]string, 0, len(cfg.Tiers))
+	for _, tier := range cfg.Tiers {
+		explicit = append(explicit, tier.RequiredLabel)
+	}
+	slices.Sort(automatic)
+	slices.Sort(explicit)
+	return automatic, explicit
+}
+
+func configureAutoRouter(
+	cfg *config.Config,
+	fleet *orchestrator.Fleet,
+	providers map[string]provider.Provider,
+	database storage.RoutingStore,
+	log *slog.Logger,
+) (*router.Router, error) {
+	if len(cfg.Routing.Routes) == 0 {
+		return nil, nil
+	}
+	names := make([]string, 0, len(cfg.Routing.Routes))
+	for name := range cfg.Routing.Routes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	routes := make([]router.Route, 0, len(names))
+	for _, name := range names {
+		route := cfg.Routing.Routes[name]
+		for _, tierName := range route.Candidates {
+			tier := cfg.Tiers[tierName]
+			prov := providers[tier.Provider]
+			if _, ok := prov.(provider.Pricer); !ok {
+				return nil, fmt.Errorf("routing route %s candidate tier %s provider does not implement pricing", name, tierName)
+			}
+		}
+		routes = append(routes, router.Route{
+			Name: name, RequiredLabel: route.RequiredLabel,
+			Candidates: append([]string(nil), route.Candidates...), FallbackTier: route.FallbackTier,
+			HistoryWindow: route.HistoryWindow.D(), MinSamples: route.MinSamples,
+			ColdStartP95: route.ColdStartP95.D(), MaxOptimizationWaitQueue: route.MaxOptimizationWaitQueue,
+			Queue: forgejo.New(cfg.Forgejo.URL, cfg.Forgejo.Scope, cfg.Forgejo.Token, route.RequiredLabel),
+		})
+	}
+	_, explicit := routingLabels(cfg)
+	return router.New(router.Config{
+		Source: forgejoSource(cfg.Forgejo), Currency: cfg.Routing.Currency,
+		ExchangeRates: maps.Clone(cfg.Routing.ExchangeRates), PollInterval: cfg.Poll.Interval.D(),
+		ExplicitLabels: explicit, Routes: routes,
+	}, fleet, providers, database, log.With("component", "router"))
+}
+
+func runFleetServices(ctx context.Context, fleet *orchestrator.Fleet, autoRouter *router.Router) error {
+	if autoRouter == nil {
+		return fleet.Run(ctx)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	eventsCh, unsubscribe := autoRouter.Subscribe()
+	defer unsubscribe()
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case event, ok := <-eventsCh:
+				if !ok {
+					return
+				}
+				fleet.PublishEvent(event)
+			}
+		}
+	}()
+	for _, run := range []func(context.Context) error{fleet.Run, autoRouter.Run} {
+		go func() {
+			defer wg.Done()
+			if err := run(runCtx); err != nil {
+				errCh <- err
+				cancel()
+			}
+		}()
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case err := <-errCh:
+		<-done
+		return err
+	case <-ctx.Done():
+		cancel()
+		<-done
+		return nil
+	case <-done:
+		return nil
+	}
+}
+
+func providerForTransport(cfg *config.Config, providers map[string]provider.Provider) (provider.Provider, error) {
+	if cfg.Transport.Mode == config.TransportCacheGateway {
+		for _, tier := range cfg.Tiers {
+			return providers[tier.Provider], nil
+		}
+	}
+	for _, tierName := range cfg.TierNames() {
+		return providers[cfg.Tiers[tierName].Provider], nil
+	}
+	return nil, errors.New("no provider available for transport")
 }
 
 // controlOpts groups the wiring inputs for startControlPlane so adding a new
@@ -216,18 +412,18 @@ type controlOpts struct {
 	enableWrites bool
 	configPath   string
 	cfg          *config.Config
-	providerName string
 }
 
 // startControlPlane spins up the operator-facing HTTP/RPC server on a side
 // goroutine. Empty listen disables it (e.g. for tests or restricted deploys).
 // If a token file is supplied, every Connect RPC must carry an
-// Authorization: Bearer header matching its contents; /healthz and /metrics
-// stay open. Returns an error only on bad operator config (missing token
+// Authorization: Bearer header matching its contents; /healthz, /metrics, and
+// the data-free dashboard shell stay open while /dashboard/api is protected.
+// Returns an error only on bad operator config (missing token
 // file, unreadable token, a non-loopback bind with no token, or
 // -enable-control-writes set on a non-loopback bind with no token) — once
 // it successfully arms the goroutine, runtime listen errors are logged.
-func startControlPlane(ctx context.Context, opts controlOpts, orch *orchestrator.Orchestrator, prov provider.Provider, logBus *logbus.Bus, log *slog.Logger) error {
+func startControlPlane(ctx context.Context, opts controlOpts, fleet *orchestrator.Fleet, providers map[string]provider.Provider, store storage.Store, autoRouter *router.Router, logBus *logbus.Bus, log *slog.Logger) error {
 	if opts.listen == "" {
 		return nil
 	}
@@ -253,12 +449,13 @@ func startControlPlane(ctx context.Context, opts controlOpts, orch *orchestrator
 		return fmt.Errorf("-enable-control-writes on non-loopback bind %q requires -control-token-file", opts.listen)
 	}
 	backend := &controlBackend{
-		o:            orch,
-		prov:         prov,
-		providerName: opts.providerName,
-		logBus:       logBus,
-		configPath:   opts.configPath,
-		cfg:          opts.cfg,
+		fleet:      fleet,
+		providers:  providers,
+		store:      store,
+		router:     autoRouter,
+		logBus:     logBus,
+		configPath: opts.configPath,
+		cfg:        opts.cfg,
 	}
 	srv := control.NewServer(opts.listen, backend, log,
 		control.WithBearerToken(token),
@@ -279,32 +476,74 @@ func startControlPlane(ctx context.Context, opts controlOpts, orch *orchestrator
 // GetConfig and ReloadConfig both take it; no other adapter method touches
 // the on-disk config struct (the orchestrator owns its own copy).
 type controlBackend struct {
-	o            *orchestrator.Orchestrator
-	prov         provider.Provider
-	providerName string
-	logBus       *logbus.Bus
-	configPath   string
+	fleet      *orchestrator.Fleet
+	providers  map[string]provider.Provider
+	store      storage.Store
+	router     *router.Router
+	logBus     *logbus.Bus
+	configPath string
 
 	configMu sync.RWMutex
 	cfg      *config.Config
 }
 
 func (b *controlBackend) Health(ctx context.Context) control.HealthStatus {
-	s := b.o.Health(ctx)
+	s := b.fleet.Health(ctx)
+	databaseHealthy := true
+	routingHealthy := true
+	var lastWrite time.Time
+	var databaseError string
+	var routingHealth router.Health
+	if b.store != nil {
+		h := b.store.Health(ctx)
+		databaseHealthy = h.Healthy
+		lastWrite = h.LastSuccessfulWrite
+		databaseError = h.LastError
+	}
+	if b.router != nil {
+		routingHealth = b.router.Health()
+		routingHealthy = routingHealth.Healthy
+	}
 	return control.HealthStatus{
-		Healthy:            s.Healthy,
-		LastTickAt:         s.LastTickAt,
-		LastProviderListAt: s.LastProviderListAt,
-		LastForgejoPollAt:  s.LastForgejoPollAt,
-		Paused:             s.Paused,
+		Healthy:                     s.Healthy && databaseHealthy && routingHealthy,
+		LastTickAt:                  s.LastTickAt,
+		LastProviderListAt:          s.LastProviderListAt,
+		LastForgejoPollAt:           s.LastForgejoPollAt,
+		Paused:                      s.Paused,
+		DatabaseHealthy:             databaseHealthy,
+		DatabaseLastSuccessfulWrite: lastWrite,
+		DatabaseLastError:           databaseError,
+		RoutingHealthy:              routingHealthy,
+		RoutingLastPollAt:           routingHealth.LastPollAt,
+		RoutingLastDecisionAt:       routingHealth.LastDecisionAt,
+		RoutingLastError:            routingHealth.LastError,
+		RoutingDegradedPricing:      routingHealth.DegradedPricing,
 	}
 }
 
+func (b *controlBackend) PoolSnapshotFiltered(tier, providerName string) []control.WorkerView {
+	workers := b.PoolSnapshot()
+	out := workers[:0]
+	for _, worker := range workers {
+		if tier != "" && worker.Tier != tier {
+			continue
+		}
+		if providerName != "" && worker.ProviderName != providerName {
+			continue
+		}
+		out = append(out, worker)
+	}
+	return out
+}
+
 func (b *controlBackend) PoolSnapshot() []control.WorkerView {
-	in := b.o.PoolSnapshot()
+	in := b.fleet.PoolSnapshot()
 	out := make([]control.WorkerView, 0, len(in))
 	for _, w := range in {
 		out = append(out, control.WorkerView{
+			Tier:           w.Tier,
+			ProviderName:   w.ProviderName,
+			Driver:         w.Driver,
 			InstanceID:     w.InstanceID,
 			State:          w.State,
 			IP:             w.IP,
@@ -321,7 +560,7 @@ func (b *controlBackend) PoolSnapshot() []control.WorkerView {
 }
 
 func (b *controlBackend) Kick(ctx context.Context) (control.ReconcileResult, error) {
-	r, err := b.o.Kick(ctx)
+	r, err := b.fleet.Kick(ctx)
 	if err != nil {
 		return control.ReconcileResult{}, err
 	}
@@ -336,7 +575,7 @@ func (b *controlBackend) Kick(ctx context.Context) (control.ReconcileResult, err
 }
 
 func (b *controlBackend) Subscribe() (<-chan events.Event, func()) {
-	return b.o.Subscribe()
+	return b.fleet.Subscribe()
 }
 
 func (b *controlBackend) SubscribeLogs(filter logbus.Filter) (<-chan logbus.Record, func()) {
@@ -348,19 +587,27 @@ func (b *controlBackend) LogHistory(n int, filter logbus.Filter) []logbus.Record
 }
 
 func (b *controlBackend) ForceReap(ctx context.Context, instanceID string) error {
-	return b.o.ForceReap(ctx, instanceID)
+	return b.fleet.ForceReap(ctx, instanceID)
+}
+
+func (b *controlBackend) ForceReapIn(ctx context.Context, tier, instanceID string) error {
+	return b.fleet.ForceReapIn(ctx, tier, instanceID)
 }
 
 func (b *controlBackend) ForceProvision(ctx context.Context) (string, error) {
-	return b.o.ForceProvision(ctx)
+	return b.fleet.ForceProvision(ctx)
+}
+
+func (b *controlBackend) ForceProvisionIn(ctx context.Context, tier string) (string, error) {
+	return b.fleet.ForceProvisionIn(ctx, tier)
 }
 
 func (b *controlBackend) Pause(ctx context.Context) {
-	b.o.Pause(ctx)
+	b.fleet.Pause(ctx)
 }
 
 func (b *controlBackend) Resume(ctx context.Context) {
-	b.o.Resume(ctx)
+	b.fleet.Resume(ctx)
 }
 
 // GetConfig serialises the daemon's live config (with secrets redacted) as
@@ -396,30 +643,35 @@ func (b *controlBackend) ReloadConfig(_ context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reload %s: %w", b.configPath, err)
 	}
-	// Build the candidate orchestrator config by overlaying the on-disk
-	// values onto whatever the orchestrator is running now. CLI-flag-only
-	// fields (RunnerVersion, drain settings, ReadyFile, AuthorizedKey,
-	// Tag, billing model) keep their startup values; ApplyHotConfig will
-	// reject any drift on those.
-	cur := b.o.CurrentConfig()
-	next := cur
-	next.MaxScale = newCfg.Scale.Max
-	next.Labels = newCfg.Forgejo.Labels
-	next.PollInterval = newCfg.Poll.Interval.D()
-	next.Teardown.IdleTimeout = newCfg.Poll.IdleTimeout.D()
-	next.Teardown.HourMargin = newCfg.Poll.HourMargin.D()
-	next.Teardown.BillingHour = newCfg.Poll.BillingHour.D()
-	// Non-hot fields the on-disk file carries: surfacing a change here
-	// before ApplyHotConfig keeps the error message close to the file
-	// the operator just edited.
-	if newCfg.Tag != cur.Tag {
-		return nil, fmt.Errorf("reload rejected: tag changed (was %q, now %q); restart required",
-			cur.Tag, newCfg.Tag)
+	b.configMu.RLock()
+	oldCfg := b.cfg
+	b.configMu.RUnlock()
+	if b.router != nil && oldCfg != nil && oldCfg.Poll.Interval != newCfg.Poll.Interval {
+		return nil, errors.New("reload rejected: poll.interval changes require a restart while automatic routing is configured")
 	}
-
-	changed, err := b.o.ApplyHotConfig(next)
-	if err != nil {
-		return nil, err
+	if oldCfg == nil || staticConfigFingerprint(oldCfg) != staticConfigFingerprint(newCfg) {
+		return nil, errors.New("reload rejected: providers, tier routing/machine/reset mode, database.path, forgejo, ssh, transport, or tag changed; restart required")
+	}
+	current := b.fleet.CurrentConfigs()
+	var changed []string
+	for _, tierName := range newCfg.TierNames() {
+		tier := newCfg.Tiers[tierName]
+		next := current[tierName]
+		next.MaxScale = tier.MaxInstances
+		next.WarmInstances = tier.WarmInstances
+		next.ResetMinRemaining = tier.ResetMinRemaining.D()
+		next.ResetTimeout = tier.ResetTimeout.D()
+		next.PollInterval = newCfg.Poll.Interval.D()
+		next.Teardown.IdleTimeout = tier.IdleTimeout.D()
+		next.Teardown.HourMargin = tier.HourMargin.D()
+		next.Teardown.BillingHour = tier.BillingHour.D()
+		fields, aerr := b.fleet.ApplyHotConfig(tierName, next)
+		if aerr != nil {
+			return nil, aerr
+		}
+		for _, field := range fields {
+			changed = append(changed, "tiers."+tierName+"."+field)
+		}
 	}
 	b.configMu.Lock()
 	b.cfg = newCfg
@@ -427,11 +679,38 @@ func (b *controlBackend) ReloadConfig(_ context.Context) ([]string, error) {
 	return changed, nil
 }
 
+func staticConfigFingerprint(cfg *config.Config) string {
+	cp := *cfg
+	cp.Poll.Interval = 0
+	cp.Tiers = make(map[string]config.Tier, len(cfg.Tiers))
+	for name, tier := range cfg.Tiers {
+		tier.MaxInstances = 0
+		tier.WarmInstances = 0
+		tier.ResetMinRemaining = 0
+		tier.ResetTimeout = 0
+		tier.IdleTimeout = 0
+		tier.HourMargin = 0
+		tier.BillingHour = 0
+		cp.Tiers[name] = tier
+	}
+	raw, _ := yaml.Marshal(cp)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
 // ExecOnWorker forwards to the orchestrator and unpacks ExecResult into
 // the flat shape the control.Backend interface expects (so the control
 // package stays free of orchestrator-side types).
 func (b *controlBackend) ExecOnWorker(ctx context.Context, instanceID, command string) ([]byte, []byte, int32, int64, int64, error) {
-	r, err := b.o.ExecOnWorker(ctx, instanceID, command)
+	r, err := b.fleet.ExecOnWorker(ctx, instanceID, command)
+	if err != nil {
+		return nil, nil, 0, 0, 0, err
+	}
+	return r.Stdout, r.Stderr, r.ExitCode, r.TruncatedStdout, r.TruncatedStderr, nil
+}
+
+func (b *controlBackend) ExecOnWorkerIn(ctx context.Context, tier, instanceID, command string) ([]byte, []byte, int32, int64, int64, error) {
+	r, err := b.fleet.ExecOnWorkerIn(ctx, tier, instanceID, command)
 	if err != nil {
 		return nil, nil, 0, 0, 0, err
 	}
@@ -447,24 +726,90 @@ func (b *controlBackend) ExecOnWorker(ctx context.Context, instanceID, command s
 // provider.Provider interface from growing every time we add a
 // provider-debug surface (FJB-31).
 func (b *controlBackend) ProviderInfo(ctx context.Context) (string, map[string]string) {
-	if ip, ok := b.prov.(provider.InfoProvider); ok {
-		return b.providerName, ip.Info(ctx)
+	return b.ProviderInfoFor(ctx, "")
+}
+
+func (b *controlBackend) ProviderInfoFor(ctx context.Context, selected string) (string, map[string]string) {
+	if selected != "" {
+		prov, ok := b.providers[selected]
+		if !ok {
+			return selected, map[string]string{"error": "unknown provider"}
+		}
+		if ip, ok := prov.(provider.InfoProvider); ok {
+			return selected, ip.Info(ctx)
+		}
+		return selected, map[string]string{}
 	}
-	return b.providerName, map[string]string{}
+	if len(b.providers) == 1 {
+		for name, prov := range b.providers {
+			if ip, ok := prov.(provider.InfoProvider); ok {
+				return name, ip.Info(ctx)
+			}
+			return name, map[string]string{}
+		}
+	}
+	info := make(map[string]string)
+	for name, prov := range b.providers {
+		if ip, ok := prov.(provider.InfoProvider); ok {
+			for key, value := range ip.Info(ctx) {
+				info[name+"."+key] = value
+			}
+		}
+	}
+	return "multiple", info
+}
+
+func (b *controlBackend) JobHistory(ctx context.Context, filter storage.HistoryFilter) (storage.JobPage, error) {
+	if b.store == nil {
+		return storage.JobPage{}, errors.New("durable storage is unavailable")
+	}
+	return b.store.JobHistory(ctx, filter)
+}
+
+func (b *controlBackend) Statistics(ctx context.Context, filter storage.StatisticsFilter) (storage.Statistics, error) {
+	if b.store == nil {
+		return storage.Statistics{}, errors.New("durable storage is unavailable")
+	}
+	return b.store.Statistics(ctx, filter)
+}
+
+func (b *controlBackend) QueueSnapshot(ctx context.Context, now time.Time) ([]storage.QueueJob, error) {
+	reporter, ok := b.store.(storage.DashboardStore)
+	if !ok {
+		return nil, errors.New("durable queue snapshot is unavailable")
+	}
+	return reporter.QueueSnapshot(ctx, now)
 }
 
 // CacheStatus walks the provider for cache info if it supports it (Linode
 // does; docker doesn't). The type-assertion keeps the orchestrator package
 // free of provider-specific imports.
 func (b *controlBackend) CacheStatus(ctx context.Context) *control.CacheStatus {
+	return b.CacheStatusFor(ctx, "")
+}
+
+func (b *controlBackend) CacheStatusFor(ctx context.Context, selected string) *control.CacheStatus {
 	type cacheReporter interface {
 		CacheStatus(ctx context.Context) *linodeprov.CacheStatus
 	}
-	cr, ok := b.prov.(cacheReporter)
-	if !ok {
-		return nil
+	var s *linodeprov.CacheStatus
+	for name, prov := range b.providers {
+		if selected != "" && name != selected {
+			continue
+		}
+		cr, ok := prov.(cacheReporter)
+		if !ok {
+			continue
+		}
+		candidate := cr.CacheStatus(ctx)
+		if candidate == nil {
+			continue
+		}
+		if s != nil {
+			return nil // ambiguous legacy GetCache request
+		}
+		s = candidate
 	}
-	s := cr.CacheStatus(ctx)
 	if s == nil {
 		return nil
 	}
@@ -673,13 +1018,13 @@ func plumbOrchestratorWGPubkey(prov provider.Provider, t config.Transport) error
 }
 
 // sshDispatcherFrom builds the SSH dispatcher from config.
-func sshDispatcherFrom(cfg *config.Config, signer ssh.Signer) *orchestrator.SSHDispatcher {
+func sshDispatcherFrom(cfg *config.Config, signer ssh.Signer, labels []string) *orchestrator.SSHDispatcher {
 	return &orchestrator.SSHDispatcher{
 		User:        cfg.SSH.User,
 		Port:        cfg.SSH.Port,
 		Signer:      signer,
 		ForgejoURL:  cfg.Forgejo.URL,
-		Labels:      cfg.Forgejo.Labels,
+		Labels:      labels,
 		ReadyFile:   bootstrap.DefaultReadyFile,
 		ReadyWait:   5 * time.Minute,
 		DialTimeout: 15 * time.Second,
@@ -698,13 +1043,13 @@ func sshDispatcherFrom(cfg *config.Config, signer ssh.Signer) *orchestrator.SSHD
 // embedded netstack, so the dispatcher dials via the tunnel instead
 // of the host kernel's route table. Nil falls back to the dispatcher's
 // internal net.Dialer (only useful in unit tests with loopback fakes).
-func cacheGatewayDispatcherFrom(cfg *config.Config, signer ssh.Signer, dialFn func(context.Context, string, string) (net.Conn, error)) *orchestrator.CacheGatewayDispatcher {
+func cacheGatewayDispatcherFrom(cfg *config.Config, signer ssh.Signer, dialFn func(context.Context, string, string) (net.Conn, error), labels []string) *orchestrator.CacheGatewayDispatcher {
 	return &orchestrator.CacheGatewayDispatcher{
 		User:        cfg.SSH.User,
 		Port:        cfg.SSH.Port,
 		Signer:      signer,
 		ForgejoURL:  cfg.Forgejo.URL,
-		Labels:      cfg.Forgejo.Labels,
+		Labels:      labels,
 		ReadyFile:   bootstrap.DefaultReadyFile,
 		ReadyWait:   5 * time.Minute,
 		DialTimeout: 15 * time.Second,
@@ -724,18 +1069,18 @@ func cacheGatewayDispatcherFrom(cfg *config.Config, signer ssh.Signer, dialFn fu
 // wgStack is non-nil iff transport.mode = cache-gateway: it supplies
 // the netstack DialContext the cache-gateway dispatcher must use to
 // reach worker VPC IPs (FJB-92).
-func dispatcherFor(cfg *config.Config, prov provider.Provider, signer ssh.Signer, wgStack *wgboot.Stack) (orchestrator.Dispatcher, error) {
-	if cfg.Provider == config.ProviderDocker {
+func dispatcherFor(cfg *config.Config, driver string, prov provider.Provider, signer ssh.Signer, wgStack *wgboot.Stack, labels []string) (orchestrator.Dispatcher, error) {
+	if driver == config.ProviderDocker {
 		dp, ok := prov.(*dockerprov.Docker)
 		if !ok {
-			return nil, fmt.Errorf("provider %q registered under unexpected type %T", cfg.Provider, prov)
+			return nil, fmt.Errorf("provider driver %q registered under unexpected type %T", driver, prov)
 		}
 		runner := dockerprov.NewDefaultRunner(dp.DockerBin())
 		return dockerprov.NewExecDispatcher(
 			runner,
 			dp.DockerBin(),
 			cfg.Forgejo.URL,
-			cfg.Forgejo.Labels,
+			labels,
 			dp.WaitTimeout(),
 		), nil
 	}
@@ -744,9 +1089,9 @@ func dispatcherFor(cfg *config.Config, prov provider.Provider, signer ssh.Signer
 		if wgStack != nil && wgStack.Tunnel != nil {
 			dialFn = wgStack.Tunnel.DialContext
 		}
-		return cacheGatewayDispatcherFrom(cfg, signer, dialFn), nil
+		return cacheGatewayDispatcherFrom(cfg, signer, dialFn, labels), nil
 	}
-	return sshDispatcherFrom(cfg, signer), nil
+	return sshDispatcherFrom(cfg, signer, labels), nil
 }
 
 // loadSSHKey reads a PEM private key file and returns the signer plus its
@@ -841,33 +1186,121 @@ func loadFJBAgentSettings(opts runOpts, buildVersion string) (token, url string,
 // buildOrchestratorConfig assembles the orchestrator.Config from the
 // loaded config + flags. Extracted from run() so the latter stays under
 // the gocyclo budget after Phase B added the FJB-94 token-load branch.
-func buildOrchestratorConfig(cfg *config.Config, opts runOpts, buildVersion, authKey string, prov provider.Provider) (orchestrator.Config, error) {
+func buildOrchestratorConfig(cfg *config.Config, tierName string, tier config.Tier, opts runOpts, buildVersion, authKey string, prov provider.Provider) (orchestrator.Config, error) {
 	fjbAgentToken, fjbAgentURL, err := loadFJBAgentSettings(opts, buildVersion)
 	if err != nil {
 		return orchestrator.Config{}, err
 	}
 	_ = prov // reserved for Phase C: provider-aware SetFJBAgent wiring lives in its own helper there.
 	return orchestrator.Config{
-		Tag:                 cfg.Tag,
-		MaxScale:            cfg.Scale.Max,
-		Labels:              cfg.Forgejo.Labels,
-		PollInterval:        cfg.Poll.Interval.D(),
-		RunnerVersion:       opts.runnerVersion,
-		ReadyFile:           bootstrap.DefaultReadyFile,
-		AuthorizedKey:       authKey,
-		TransportMode:       cfg.Transport.Mode,
-		FJBAgentDownloadURL: fjbAgentURL,
-		FJBAgentToken:       fjbAgentToken,
+		Tier:                 tierName,
+		ProviderName:         tier.Provider,
+		Driver:               cfg.Providers[tier.Provider].Driver,
+		Tag:                  cfg.TierTag(tierName),
+		MaxScale:             tier.MaxInstances,
+		WarmInstances:        tier.WarmInstances,
+		Labels:               append([]string(nil), tier.Labels...),
+		InstanceType:         tier.InstanceType,
+		OneJobPerVM:          tier.OneJobPerVM,
+		ResetMode:            tier.ResetMode,
+		ResetMinRemaining:    tier.ResetMinRemaining.D(),
+		ResetTimeout:         tier.ResetTimeout.D(),
+		PollInterval:         cfg.Poll.Interval.D(),
+		RunnerVersion:        opts.runnerVersion,
+		ReadyFile:            bootstrap.DefaultReadyFile,
+		AuthorizedKey:        authKey,
+		TransportMode:        cfg.Transport.Mode,
+		FJBAgentDownloadURL:  fjbAgentURL,
+		FJBAgentToken:        fjbAgentToken,
+		BootstrapFingerprint: bootstrapFingerprint(cfg, tierName, tier, opts.runnerVersion, fjbAgentURL),
+		ForgejoSource:        forgejoSource(cfg.Forgejo),
 		Teardown: orchestrator.TeardownPolicy{
 			Model:       prov.BillingModel(),
-			IdleTimeout: cfg.Poll.IdleTimeout.D(),
-			HourMargin:  cfg.Poll.HourMargin.D(),
-			BillingHour: cfg.Poll.BillingHour.D(),
+			IdleTimeout: tier.IdleTimeout.D(),
+			HourMargin:  tier.HourMargin.D(),
+			BillingHour: tier.BillingHour.D(),
 		},
 		DrainOnShutdown: opts.drain,
 		DrainTimeout:    opts.drainTimeout,
 		DestroyOnExit:   opts.destroyOnExit,
 	}, nil
+}
+
+func forgejoSource(cfg config.Forgejo) string {
+	sum := sha256.Sum256([]byte(strings.TrimRight(cfg.URL, "/") + "\x00" + cfg.Scope))
+	return "forgejo:" + hex.EncodeToString(sum[:16])
+}
+
+// recoverDurableState closes process-owned intervals that cannot survive a
+// daemon restart. Provider resources and snapshots are reconciled separately
+// against cloud truth by each tier, so their pending intents remain open until
+// that pass can classify them safely.
+func recoverDurableState(ctx context.Context, store storage.Store) error {
+	now := time.Now().UTC()
+	if err := recoverInterruptedJobs(ctx, store, now); err != nil {
+		return err
+	}
+	phases, err := store.OpenPhases(ctx)
+	if err != nil {
+		return fmt.Errorf("list open phases: %w", err)
+	}
+	for _, phase := range phases {
+		if err := store.FinishPhase(ctx, phase.ID, "interrupted", "daemon_restart", now); err != nil {
+			return fmt.Errorf("interrupt phase %d: %w", phase.ID, err)
+		}
+	}
+	return nil
+}
+
+func startRetention(ctx context.Context, store storage.Store, retention time.Duration, log *slog.Logger) {
+	if retention <= 0 {
+		return
+	}
+	run := func() {
+		result, err := store.Retain(ctx, time.Now().UTC().Add(-retention))
+		if err != nil {
+			log.Error("database retention", "err", err)
+			return
+		}
+		log.Debug("database retention complete", "jobs", result.Jobs, "resources", result.Resources,
+			"snapshots", result.Snapshots, "costs", result.Costs)
+	}
+	run()
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				run()
+			}
+		}
+	}()
+}
+
+func bootstrapFingerprint(cfg *config.Config, tierName string, tier config.Tier, runnerVersion, agentURL string) string {
+	return bootstrapFingerprintWithContract(
+		cfg, tierName, tier, runnerVersion, agentURL, bootstrap.SnapshotContractMarker(),
+	)
+}
+
+func bootstrapFingerprintWithContract(
+	cfg *config.Config,
+	tierName string,
+	tier config.Tier,
+	runnerVersion string,
+	agentURL string,
+	contractMarker string,
+) string {
+	providerDef := cfg.Providers[tier.Provider]
+	rawProvider, _ := yaml.Marshal(providerDef.Config)
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00", tierName,
+		providerDef.Driver, tier.InstanceType, runnerVersion, agentURL, bootstrap.DefaultReadyFile, contractMarker)
+	_, _ = h.Write(rawProvider)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // applyAuthorizedKeyToLinodeProvider hands the operator's SSH authorized-key
@@ -894,8 +1327,12 @@ func applyAuthorizedKeyToLinodeProvider(prov provider.Provider, authKey string) 
 // over SSH; docker dispatches via container exec and needs nothing. Empty
 // returns are safe for both signer and authKey on the docker path. Extracted
 // to keep run() under the gocyclo budget after FJB-94 Phase B.
-func loadSSHKeyForProvider(cfg *config.Config) (ssh.Signer, string, error) {
-	if cfg.Provider == config.ProviderDocker {
+func loadSSHKeyForConfig(cfg *config.Config) (ssh.Signer, string, error) {
+	needsSSH := false
+	for _, def := range cfg.Providers {
+		needsSSH = needsSSH || def.Driver != config.ProviderDocker
+	}
+	if !needsSSH {
 		return nil, "", nil
 	}
 	return loadSSHKey(cfg.SSH.PrivateKeyFile)

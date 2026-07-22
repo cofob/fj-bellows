@@ -9,6 +9,7 @@ package controlv1
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	durationpb "google.golang.org/protobuf/types/known/durationpb"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
@@ -77,9 +78,17 @@ type HealthResponse struct {
 	// running. A long-paused daemon will report healthy=false because the
 	// freshness counters (last_tick_at, ...) only advance on a real reconcile;
 	// the `paused` flag is the operator's signal that this is intentional.
-	Paused        bool `protobuf:"varint,5,opt,name=paused,proto3" json:"paused,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Paused                        bool                   `protobuf:"varint,5,opt,name=paused,proto3" json:"paused,omitempty"`
+	DatabaseHealthy               bool                   `protobuf:"varint,6,opt,name=database_healthy,json=databaseHealthy,proto3" json:"database_healthy,omitempty"`
+	DatabaseLastSuccessfulWriteAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=database_last_successful_write_at,json=databaseLastSuccessfulWriteAt,proto3" json:"database_last_successful_write_at,omitempty"`
+	DatabaseLastError             string                 `protobuf:"bytes,8,opt,name=database_last_error,json=databaseLastError,proto3" json:"database_last_error,omitempty"`
+	RoutingHealthy                bool                   `protobuf:"varint,9,opt,name=routing_healthy,json=routingHealthy,proto3" json:"routing_healthy,omitempty"`
+	RoutingLastPollAt             *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=routing_last_poll_at,json=routingLastPollAt,proto3" json:"routing_last_poll_at,omitempty"`
+	RoutingLastDecisionAt         *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=routing_last_decision_at,json=routingLastDecisionAt,proto3" json:"routing_last_decision_at,omitempty"`
+	RoutingLastError              string                 `protobuf:"bytes,12,opt,name=routing_last_error,json=routingLastError,proto3" json:"routing_last_error,omitempty"`
+	RoutingDegradedPricing        bool                   `protobuf:"varint,13,opt,name=routing_degraded_pricing,json=routingDegradedPricing,proto3" json:"routing_degraded_pricing,omitempty"`
+	unknownFields                 protoimpl.UnknownFields
+	sizeCache                     protoimpl.SizeCache
 }
 
 func (x *HealthResponse) Reset() {
@@ -147,8 +156,66 @@ func (x *HealthResponse) GetPaused() bool {
 	return false
 }
 
+func (x *HealthResponse) GetDatabaseHealthy() bool {
+	if x != nil {
+		return x.DatabaseHealthy
+	}
+	return false
+}
+
+func (x *HealthResponse) GetDatabaseLastSuccessfulWriteAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.DatabaseLastSuccessfulWriteAt
+	}
+	return nil
+}
+
+func (x *HealthResponse) GetDatabaseLastError() string {
+	if x != nil {
+		return x.DatabaseLastError
+	}
+	return ""
+}
+
+func (x *HealthResponse) GetRoutingHealthy() bool {
+	if x != nil {
+		return x.RoutingHealthy
+	}
+	return false
+}
+
+func (x *HealthResponse) GetRoutingLastPollAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.RoutingLastPollAt
+	}
+	return nil
+}
+
+func (x *HealthResponse) GetRoutingLastDecisionAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.RoutingLastDecisionAt
+	}
+	return nil
+}
+
+func (x *HealthResponse) GetRoutingLastError() string {
+	if x != nil {
+		return x.RoutingLastError
+	}
+	return ""
+}
+
+func (x *HealthResponse) GetRoutingDegradedPricing() bool {
+	if x != nil {
+		return x.RoutingDegradedPricing
+	}
+	return false
+}
+
 type ListWorkersRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Tier          string                 `protobuf:"bytes,1,opt,name=tier,proto3" json:"tier,omitempty"`
+	Provider      string                 `protobuf:"bytes,2,opt,name=provider,proto3" json:"provider,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -181,6 +248,20 @@ func (x *ListWorkersRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ListWorkersRequest.ProtoReflect.Descriptor instead.
 func (*ListWorkersRequest) Descriptor() ([]byte, []int) {
 	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ListWorkersRequest) GetTier() string {
+	if x != nil {
+		return x.Tier
+	}
+	return ""
+}
+
+func (x *ListWorkersRequest) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
 }
 
 type ListWorkersResponse struct {
@@ -235,7 +316,7 @@ type Worker struct {
 	// instance_id is the provider's identifier (Linode ID, docker container
 	// ID, etc.). Unique within a deployment's tag scope.
 	InstanceId string `protobuf:"bytes,1,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
-	// state is one of: provisioning | idle | busy | draining | removing.
+	// state is one of: provisioning | idle | busy | resetting | draining | removing.
 	State string `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
 	// ip is the worker's public IPv4 address. Empty for providers that
 	// dispatch by container exec (docker), and empty under future
@@ -268,6 +349,9 @@ type Worker struct {
 	// billing_model is the provider's billing model string:
 	// "per_second" or "hourly_round_up".
 	BillingModel  string `protobuf:"bytes,9,opt,name=billing_model,json=billingModel,proto3" json:"billing_model,omitempty"`
+	Tier          string `protobuf:"bytes,11,opt,name=tier,proto3" json:"tier,omitempty"`
+	Provider      string `protobuf:"bytes,12,opt,name=provider,proto3" json:"provider,omitempty"`
+	Driver        string `protobuf:"bytes,13,opt,name=driver,proto3" json:"driver,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -372,8 +456,30 @@ func (x *Worker) GetBillingModel() string {
 	return ""
 }
 
+func (x *Worker) GetTier() string {
+	if x != nil {
+		return x.Tier
+	}
+	return ""
+}
+
+func (x *Worker) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *Worker) GetDriver() string {
+	if x != nil {
+		return x.Driver
+	}
+	return ""
+}
+
 type GetCacheRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Provider      string                 `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -406,6 +512,13 @@ func (x *GetCacheRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use GetCacheRequest.ProtoReflect.Descriptor instead.
 func (*GetCacheRequest) Descriptor() ([]byte, []int) {
 	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *GetCacheRequest) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
 }
 
 type GetCacheResponse struct {
@@ -646,6 +759,7 @@ type ForceReapRequest struct {
 	// instance_id is the provider's identifier (Linode ID, docker container
 	// ID, etc.) of the worker to destroy. Must be present in the pool.
 	InstanceId    string `protobuf:"bytes,1,opt,name=instance_id,json=instanceId,proto3" json:"instance_id,omitempty"`
+	Tier          string `protobuf:"bytes,2,opt,name=tier,proto3" json:"tier,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -683,6 +797,13 @@ func (*ForceReapRequest) Descriptor() ([]byte, []int) {
 func (x *ForceReapRequest) GetInstanceId() string {
 	if x != nil {
 		return x.InstanceId
+	}
+	return ""
+}
+
+func (x *ForceReapRequest) GetTier() string {
+	if x != nil {
+		return x.Tier
 	}
 	return ""
 }
@@ -728,6 +849,7 @@ func (*ForceReapResponse) Descriptor() ([]byte, []int) {
 
 type ForceProvisionRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Tier          string                 `protobuf:"bytes,1,opt,name=tier,proto3" json:"tier,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -760,6 +882,13 @@ func (x *ForceProvisionRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ForceProvisionRequest.ProtoReflect.Descriptor instead.
 func (*ForceProvisionRequest) Descriptor() ([]byte, []int) {
 	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ForceProvisionRequest) GetTier() string {
+	if x != nil {
+		return x.Tier
+	}
+	return ""
 }
 
 type ForceProvisionResponse struct {
@@ -969,6 +1098,7 @@ type ExecOnWorkerRequest struct {
 	// on the worker. Capped at 64 KiB; longer requests are rejected with
 	// CodeInvalidArgument.
 	Command       string `protobuf:"bytes,2,opt,name=command,proto3" json:"command,omitempty"`
+	Tier          string `protobuf:"bytes,3,opt,name=tier,proto3" json:"tier,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1013,6 +1143,13 @@ func (x *ExecOnWorkerRequest) GetInstanceId() string {
 func (x *ExecOnWorkerRequest) GetCommand() string {
 	if x != nil {
 		return x.Command
+	}
+	return ""
+}
+
+func (x *ExecOnWorkerRequest) GetTier() string {
+	if x != nil {
+		return x.Tier
 	}
 	return ""
 }
@@ -1098,6 +1235,8 @@ func (x *ExecOnWorkerResponse) GetTruncatedStderr() int64 {
 
 type StreamEventsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Tier          string                 `protobuf:"bytes,1,opt,name=tier,proto3" json:"tier,omitempty"`
+	Provider      string                 `protobuf:"bytes,2,opt,name=provider,proto3" json:"provider,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1130,6 +1269,20 @@ func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use StreamEventsRequest.ProtoReflect.Descriptor instead.
 func (*StreamEventsRequest) Descriptor() ([]byte, []int) {
 	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *StreamEventsRequest) GetTier() string {
+	if x != nil {
+		return x.Tier
+	}
+	return ""
+}
+
+func (x *StreamEventsRequest) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
 }
 
 type StreamEventsResponse struct {
@@ -1445,6 +1598,7 @@ func (x *StreamLogsRequest) GetHistoryLines() int32 {
 
 type ProviderInfoRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Provider      string                 `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1477,6 +1631,13 @@ func (x *ProviderInfoRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ProviderInfoRequest.ProtoReflect.Descriptor instead.
 func (*ProviderInfoRequest) Descriptor() ([]byte, []int) {
 	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *ProviderInfoRequest) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
 }
 
 type ProviderInfoResponse struct {
@@ -1609,22 +1770,1422 @@ func (x *StreamLogsResponse) GetAttrs() map[string]string {
 	return nil
 }
 
+type JobHistoryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	From          *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=from,proto3" json:"from,omitempty"`
+	To            *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=to,proto3" json:"to,omitempty"`
+	Tier          string                 `protobuf:"bytes,3,opt,name=tier,proto3" json:"tier,omitempty"`
+	Provider      string                 `protobuf:"bytes,4,opt,name=provider,proto3" json:"provider,omitempty"`
+	Repository    string                 `protobuf:"bytes,5,opt,name=repository,proto3" json:"repository,omitempty"`
+	Workflow      string                 `protobuf:"bytes,6,opt,name=workflow,proto3" json:"workflow,omitempty"`
+	Status        string                 `protobuf:"bytes,7,opt,name=status,proto3" json:"status,omitempty"`
+	Limit         int32                  `protobuf:"varint,8,opt,name=limit,proto3" json:"limit,omitempty"`
+	Cursor        string                 `protobuf:"bytes,9,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JobHistoryRequest) Reset() {
+	*x = JobHistoryRequest{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JobHistoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JobHistoryRequest) ProtoMessage() {}
+
+func (x *JobHistoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JobHistoryRequest.ProtoReflect.Descriptor instead.
+func (*JobHistoryRequest) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *JobHistoryRequest) GetFrom() *timestamppb.Timestamp {
+	if x != nil {
+		return x.From
+	}
+	return nil
+}
+
+func (x *JobHistoryRequest) GetTo() *timestamppb.Timestamp {
+	if x != nil {
+		return x.To
+	}
+	return nil
+}
+
+func (x *JobHistoryRequest) GetTier() string {
+	if x != nil {
+		return x.Tier
+	}
+	return ""
+}
+
+func (x *JobHistoryRequest) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *JobHistoryRequest) GetRepository() string {
+	if x != nil {
+		return x.Repository
+	}
+	return ""
+}
+
+func (x *JobHistoryRequest) GetWorkflow() string {
+	if x != nil {
+		return x.Workflow
+	}
+	return ""
+}
+
+func (x *JobHistoryRequest) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *JobHistoryRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *JobHistoryRequest) GetCursor() string {
+	if x != nil {
+		return x.Cursor
+	}
+	return ""
+}
+
+type JobHistoryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Jobs          []*Job                 `protobuf:"bytes,1,rep,name=jobs,proto3" json:"jobs,omitempty"`
+	NextCursor    string                 `protobuf:"bytes,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JobHistoryResponse) Reset() {
+	*x = JobHistoryResponse{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JobHistoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JobHistoryResponse) ProtoMessage() {}
+
+func (x *JobHistoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JobHistoryResponse.ProtoReflect.Descriptor instead.
+func (*JobHistoryResponse) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *JobHistoryResponse) GetJobs() []*Job {
+	if x != nil {
+		return x.Jobs
+	}
+	return nil
+}
+
+func (x *JobHistoryResponse) GetNextCursor() string {
+	if x != nil {
+		return x.NextCursor
+	}
+	return ""
+}
+
+type Job struct {
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	Id                    int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	Source                string                 `protobuf:"bytes,2,opt,name=source,proto3" json:"source,omitempty"`
+	Handle                string                 `protobuf:"bytes,3,opt,name=handle,proto3" json:"handle,omitempty"`
+	ForgejoJobId          int64                  `protobuf:"varint,4,opt,name=forgejo_job_id,json=forgejoJobId,proto3" json:"forgejo_job_id,omitempty"`
+	Attempt               int64                  `protobuf:"varint,5,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	RepositoryId          int64                  `protobuf:"varint,6,opt,name=repository_id,json=repositoryId,proto3" json:"repository_id,omitempty"`
+	Repository            string                 `protobuf:"bytes,7,opt,name=repository,proto3" json:"repository,omitempty"`
+	Workflow              string                 `protobuf:"bytes,8,opt,name=workflow,proto3" json:"workflow,omitempty"`
+	WorkflowFile          string                 `protobuf:"bytes,9,opt,name=workflow_file,json=workflowFile,proto3" json:"workflow_file,omitempty"`
+	JobName               string                 `protobuf:"bytes,10,opt,name=job_name,json=jobName,proto3" json:"job_name,omitempty"`
+	IdentityQuality       string                 `protobuf:"bytes,11,opt,name=identity_quality,json=identityQuality,proto3" json:"identity_quality,omitempty"`
+	Tier                  string                 `protobuf:"bytes,12,opt,name=tier,proto3" json:"tier,omitempty"`
+	Provider              string                 `protobuf:"bytes,13,opt,name=provider,proto3" json:"provider,omitempty"`
+	Driver                string                 `protobuf:"bytes,14,opt,name=driver,proto3" json:"driver,omitempty"`
+	Status                string                 `protobuf:"bytes,15,opt,name=status,proto3" json:"status,omitempty"`
+	Conclusion            string                 `protobuf:"bytes,16,opt,name=conclusion,proto3" json:"conclusion,omitempty"`
+	InfrastructureFailure string                 `protobuf:"bytes,17,opt,name=infrastructure_failure,json=infrastructureFailure,proto3" json:"infrastructure_failure,omitempty"`
+	FirstSeenAt           *timestamppb.Timestamp `protobuf:"bytes,18,opt,name=first_seen_at,json=firstSeenAt,proto3" json:"first_seen_at,omitempty"`
+	QueuedAt              *timestamppb.Timestamp `protobuf:"bytes,19,opt,name=queued_at,json=queuedAt,proto3" json:"queued_at,omitempty"`
+	DispatchedAt          *timestamppb.Timestamp `protobuf:"bytes,20,opt,name=dispatched_at,json=dispatchedAt,proto3" json:"dispatched_at,omitempty"`
+	RunnerStartedAt       *timestamppb.Timestamp `protobuf:"bytes,21,opt,name=runner_started_at,json=runnerStartedAt,proto3" json:"runner_started_at,omitempty"`
+	RunnerFinishedAt      *timestamppb.Timestamp `protobuf:"bytes,22,opt,name=runner_finished_at,json=runnerFinishedAt,proto3" json:"runner_finished_at,omitempty"`
+	CompletedAt           *timestamppb.Timestamp `protobuf:"bytes,23,opt,name=completed_at,json=completedAt,proto3" json:"completed_at,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *Job) Reset() {
+	*x = Job{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Job) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Job) ProtoMessage() {}
+
+func (x *Job) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Job.ProtoReflect.Descriptor instead.
+func (*Job) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *Job) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *Job) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *Job) GetHandle() string {
+	if x != nil {
+		return x.Handle
+	}
+	return ""
+}
+
+func (x *Job) GetForgejoJobId() int64 {
+	if x != nil {
+		return x.ForgejoJobId
+	}
+	return 0
+}
+
+func (x *Job) GetAttempt() int64 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *Job) GetRepositoryId() int64 {
+	if x != nil {
+		return x.RepositoryId
+	}
+	return 0
+}
+
+func (x *Job) GetRepository() string {
+	if x != nil {
+		return x.Repository
+	}
+	return ""
+}
+
+func (x *Job) GetWorkflow() string {
+	if x != nil {
+		return x.Workflow
+	}
+	return ""
+}
+
+func (x *Job) GetWorkflowFile() string {
+	if x != nil {
+		return x.WorkflowFile
+	}
+	return ""
+}
+
+func (x *Job) GetJobName() string {
+	if x != nil {
+		return x.JobName
+	}
+	return ""
+}
+
+func (x *Job) GetIdentityQuality() string {
+	if x != nil {
+		return x.IdentityQuality
+	}
+	return ""
+}
+
+func (x *Job) GetTier() string {
+	if x != nil {
+		return x.Tier
+	}
+	return ""
+}
+
+func (x *Job) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *Job) GetDriver() string {
+	if x != nil {
+		return x.Driver
+	}
+	return ""
+}
+
+func (x *Job) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *Job) GetConclusion() string {
+	if x != nil {
+		return x.Conclusion
+	}
+	return ""
+}
+
+func (x *Job) GetInfrastructureFailure() string {
+	if x != nil {
+		return x.InfrastructureFailure
+	}
+	return ""
+}
+
+func (x *Job) GetFirstSeenAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.FirstSeenAt
+	}
+	return nil
+}
+
+func (x *Job) GetQueuedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.QueuedAt
+	}
+	return nil
+}
+
+func (x *Job) GetDispatchedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.DispatchedAt
+	}
+	return nil
+}
+
+func (x *Job) GetRunnerStartedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.RunnerStartedAt
+	}
+	return nil
+}
+
+func (x *Job) GetRunnerFinishedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.RunnerFinishedAt
+	}
+	return nil
+}
+
+func (x *Job) GetCompletedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CompletedAt
+	}
+	return nil
+}
+
+type StatisticsRequest struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	From       *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=from,proto3" json:"from,omitempty"`
+	To         *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=to,proto3" json:"to,omitempty"`
+	Tier       string                 `protobuf:"bytes,3,opt,name=tier,proto3" json:"tier,omitempty"`
+	Provider   string                 `protobuf:"bytes,4,opt,name=provider,proto3" json:"provider,omitempty"`
+	Repository string                 `protobuf:"bytes,5,opt,name=repository,proto3" json:"repository,omitempty"`
+	Workflow   string                 `protobuf:"bytes,6,opt,name=workflow,proto3" json:"workflow,omitempty"`
+	// group_by is one of: none, workflow, tier, provider, day.
+	GroupBy       string `protobuf:"bytes,7,opt,name=group_by,json=groupBy,proto3" json:"group_by,omitempty"`
+	Route         string `protobuf:"bytes,8,opt,name=route,proto3" json:"route,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StatisticsRequest) Reset() {
+	*x = StatisticsRequest{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StatisticsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatisticsRequest) ProtoMessage() {}
+
+func (x *StatisticsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatisticsRequest.ProtoReflect.Descriptor instead.
+func (*StatisticsRequest) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *StatisticsRequest) GetFrom() *timestamppb.Timestamp {
+	if x != nil {
+		return x.From
+	}
+	return nil
+}
+
+func (x *StatisticsRequest) GetTo() *timestamppb.Timestamp {
+	if x != nil {
+		return x.To
+	}
+	return nil
+}
+
+func (x *StatisticsRequest) GetTier() string {
+	if x != nil {
+		return x.Tier
+	}
+	return ""
+}
+
+func (x *StatisticsRequest) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *StatisticsRequest) GetRepository() string {
+	if x != nil {
+		return x.Repository
+	}
+	return ""
+}
+
+func (x *StatisticsRequest) GetWorkflow() string {
+	if x != nil {
+		return x.Workflow
+	}
+	return ""
+}
+
+func (x *StatisticsRequest) GetGroupBy() string {
+	if x != nil {
+		return x.GroupBy
+	}
+	return ""
+}
+
+func (x *StatisticsRequest) GetRoute() string {
+	if x != nil {
+		return x.Route
+	}
+	return ""
+}
+
+type StatisticsResponse struct {
+	state                protoimpl.MessageState  `protogen:"open.v1"`
+	Groups               []*StatisticsGroup      `protobuf:"bytes,1,rep,name=groups,proto3" json:"groups,omitempty"`
+	FleetCosts           []*FleetCostTotal       `protobuf:"bytes,2,rep,name=fleet_costs,json=fleetCosts,proto3" json:"fleet_costs,omitempty"`
+	FleetTimings         []*FleetTimingTotal     `protobuf:"bytes,3,rep,name=fleet_timings,json=fleetTimings,proto3" json:"fleet_timings,omitempty"`
+	RoutingEffectiveness []*RoutingEffectiveness `protobuf:"bytes,4,rep,name=routing_effectiveness,json=routingEffectiveness,proto3" json:"routing_effectiveness,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *StatisticsResponse) Reset() {
+	*x = StatisticsResponse{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StatisticsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatisticsResponse) ProtoMessage() {}
+
+func (x *StatisticsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatisticsResponse.ProtoReflect.Descriptor instead.
+func (*StatisticsResponse) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *StatisticsResponse) GetGroups() []*StatisticsGroup {
+	if x != nil {
+		return x.Groups
+	}
+	return nil
+}
+
+func (x *StatisticsResponse) GetFleetCosts() []*FleetCostTotal {
+	if x != nil {
+		return x.FleetCosts
+	}
+	return nil
+}
+
+func (x *StatisticsResponse) GetFleetTimings() []*FleetTimingTotal {
+	if x != nil {
+		return x.FleetTimings
+	}
+	return nil
+}
+
+func (x *StatisticsResponse) GetRoutingEffectiveness() []*RoutingEffectiveness {
+	if x != nil {
+		return x.RoutingEffectiveness
+	}
+	return nil
+}
+
+type StatisticsKey struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Source        string                 `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`
+	RepositoryId  int64                  `protobuf:"varint,2,opt,name=repository_id,json=repositoryId,proto3" json:"repository_id,omitempty"`
+	Repository    string                 `protobuf:"bytes,3,opt,name=repository,proto3" json:"repository,omitempty"`
+	Workflow      string                 `protobuf:"bytes,4,opt,name=workflow,proto3" json:"workflow,omitempty"`
+	Tier          string                 `protobuf:"bytes,5,opt,name=tier,proto3" json:"tier,omitempty"`
+	Provider      string                 `protobuf:"bytes,6,opt,name=provider,proto3" json:"provider,omitempty"`
+	Day           string                 `protobuf:"bytes,7,opt,name=day,proto3" json:"day,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StatisticsKey) Reset() {
+	*x = StatisticsKey{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StatisticsKey) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatisticsKey) ProtoMessage() {}
+
+func (x *StatisticsKey) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatisticsKey.ProtoReflect.Descriptor instead.
+func (*StatisticsKey) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *StatisticsKey) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *StatisticsKey) GetRepositoryId() int64 {
+	if x != nil {
+		return x.RepositoryId
+	}
+	return 0
+}
+
+func (x *StatisticsKey) GetRepository() string {
+	if x != nil {
+		return x.Repository
+	}
+	return ""
+}
+
+func (x *StatisticsKey) GetWorkflow() string {
+	if x != nil {
+		return x.Workflow
+	}
+	return ""
+}
+
+func (x *StatisticsKey) GetTier() string {
+	if x != nil {
+		return x.Tier
+	}
+	return ""
+}
+
+func (x *StatisticsKey) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *StatisticsKey) GetDay() string {
+	if x != nil {
+		return x.Day
+	}
+	return ""
+}
+
+type DurationSummary struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Count         int64                  `protobuf:"varint,1,opt,name=count,proto3" json:"count,omitempty"`
+	Total         *durationpb.Duration   `protobuf:"bytes,2,opt,name=total,proto3" json:"total,omitempty"`
+	Min           *durationpb.Duration   `protobuf:"bytes,3,opt,name=min,proto3" json:"min,omitempty"`
+	Max           *durationpb.Duration   `protobuf:"bytes,4,opt,name=max,proto3" json:"max,omitempty"`
+	P50           *durationpb.Duration   `protobuf:"bytes,5,opt,name=p50,proto3" json:"p50,omitempty"`
+	P95           *durationpb.Duration   `protobuf:"bytes,6,opt,name=p95,proto3" json:"p95,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DurationSummary) Reset() {
+	*x = DurationSummary{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DurationSummary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DurationSummary) ProtoMessage() {}
+
+func (x *DurationSummary) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DurationSummary.ProtoReflect.Descriptor instead.
+func (*DurationSummary) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *DurationSummary) GetCount() int64 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+func (x *DurationSummary) GetTotal() *durationpb.Duration {
+	if x != nil {
+		return x.Total
+	}
+	return nil
+}
+
+func (x *DurationSummary) GetMin() *durationpb.Duration {
+	if x != nil {
+		return x.Min
+	}
+	return nil
+}
+
+func (x *DurationSummary) GetMax() *durationpb.Duration {
+	if x != nil {
+		return x.Max
+	}
+	return nil
+}
+
+func (x *DurationSummary) GetP50() *durationpb.Duration {
+	if x != nil {
+		return x.P50
+	}
+	return nil
+}
+
+func (x *DurationSummary) GetP95() *durationpb.Duration {
+	if x != nil {
+		return x.P95
+	}
+	return nil
+}
+
+type CostTotal struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Kind           string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
+	Currency       string                 `protobuf:"bytes,2,opt,name=currency,proto3" json:"currency,omitempty"`
+	Nanos          int64                  `protobuf:"varint,3,opt,name=nanos,proto3" json:"nanos,omitempty"`
+	Entries        int64                  `protobuf:"varint,4,opt,name=entries,proto3" json:"entries,omitempty"`
+	UnknownEntries int64                  `protobuf:"varint,5,opt,name=unknown_entries,json=unknownEntries,proto3" json:"unknown_entries,omitempty"`
+	Estimated      bool                   `protobuf:"varint,6,opt,name=estimated,proto3" json:"estimated,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *CostTotal) Reset() {
+	*x = CostTotal{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CostTotal) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CostTotal) ProtoMessage() {}
+
+func (x *CostTotal) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CostTotal.ProtoReflect.Descriptor instead.
+func (*CostTotal) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *CostTotal) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *CostTotal) GetCurrency() string {
+	if x != nil {
+		return x.Currency
+	}
+	return ""
+}
+
+func (x *CostTotal) GetNanos() int64 {
+	if x != nil {
+		return x.Nanos
+	}
+	return 0
+}
+
+func (x *CostTotal) GetEntries() int64 {
+	if x != nil {
+		return x.Entries
+	}
+	return 0
+}
+
+func (x *CostTotal) GetUnknownEntries() int64 {
+	if x != nil {
+		return x.UnknownEntries
+	}
+	return 0
+}
+
+func (x *CostTotal) GetEstimated() bool {
+	if x != nil {
+		return x.Estimated
+	}
+	return false
+}
+
+type StatisticsGroup struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Key              *StatisticsKey         `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Jobs             int64                  `protobuf:"varint,2,opt,name=jobs,proto3" json:"jobs,omitempty"`
+	Completed        int64                  `protobuf:"varint,3,opt,name=completed,proto3" json:"completed,omitempty"`
+	Succeeded        int64                  `protobuf:"varint,4,opt,name=succeeded,proto3" json:"succeeded,omitempty"`
+	Failed           int64                  `protobuf:"varint,5,opt,name=failed,proto3" json:"failed,omitempty"`
+	Cancelled        int64                  `protobuf:"varint,6,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
+	Skipped          int64                  `protobuf:"varint,7,opt,name=skipped,proto3" json:"skipped,omitempty"`
+	InfraFailed      int64                  `protobuf:"varint,8,opt,name=infra_failed,json=infraFailed,proto3" json:"infra_failed,omitempty"`
+	Interrupted      int64                  `protobuf:"varint,9,opt,name=interrupted,proto3" json:"interrupted,omitempty"`
+	InProgress       int64                  `protobuf:"varint,10,opt,name=in_progress,json=inProgress,proto3" json:"in_progress,omitempty"`
+	PricedJobs       int64                  `protobuf:"varint,11,opt,name=priced_jobs,json=pricedJobs,proto3" json:"priced_jobs,omitempty"`
+	UnpricedJobs     int64                  `protobuf:"varint,12,opt,name=unpriced_jobs,json=unpricedJobs,proto3" json:"unpriced_jobs,omitempty"`
+	QueueDuration    *DurationSummary       `protobuf:"bytes,13,opt,name=queue_duration,json=queueDuration,proto3" json:"queue_duration,omitempty"`
+	DispatchDuration *DurationSummary       `protobuf:"bytes,14,opt,name=dispatch_duration,json=dispatchDuration,proto3" json:"dispatch_duration,omitempty"`
+	RunDuration      *DurationSummary       `protobuf:"bytes,15,opt,name=run_duration,json=runDuration,proto3" json:"run_duration,omitempty"`
+	DirectCosts      []*CostTotal           `protobuf:"bytes,16,rep,name=direct_costs,json=directCosts,proto3" json:"direct_costs,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *StatisticsGroup) Reset() {
+	*x = StatisticsGroup{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StatisticsGroup) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatisticsGroup) ProtoMessage() {}
+
+func (x *StatisticsGroup) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatisticsGroup.ProtoReflect.Descriptor instead.
+func (*StatisticsGroup) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *StatisticsGroup) GetKey() *StatisticsKey {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *StatisticsGroup) GetJobs() int64 {
+	if x != nil {
+		return x.Jobs
+	}
+	return 0
+}
+
+func (x *StatisticsGroup) GetCompleted() int64 {
+	if x != nil {
+		return x.Completed
+	}
+	return 0
+}
+
+func (x *StatisticsGroup) GetSucceeded() int64 {
+	if x != nil {
+		return x.Succeeded
+	}
+	return 0
+}
+
+func (x *StatisticsGroup) GetFailed() int64 {
+	if x != nil {
+		return x.Failed
+	}
+	return 0
+}
+
+func (x *StatisticsGroup) GetCancelled() int64 {
+	if x != nil {
+		return x.Cancelled
+	}
+	return 0
+}
+
+func (x *StatisticsGroup) GetSkipped() int64 {
+	if x != nil {
+		return x.Skipped
+	}
+	return 0
+}
+
+func (x *StatisticsGroup) GetInfraFailed() int64 {
+	if x != nil {
+		return x.InfraFailed
+	}
+	return 0
+}
+
+func (x *StatisticsGroup) GetInterrupted() int64 {
+	if x != nil {
+		return x.Interrupted
+	}
+	return 0
+}
+
+func (x *StatisticsGroup) GetInProgress() int64 {
+	if x != nil {
+		return x.InProgress
+	}
+	return 0
+}
+
+func (x *StatisticsGroup) GetPricedJobs() int64 {
+	if x != nil {
+		return x.PricedJobs
+	}
+	return 0
+}
+
+func (x *StatisticsGroup) GetUnpricedJobs() int64 {
+	if x != nil {
+		return x.UnpricedJobs
+	}
+	return 0
+}
+
+func (x *StatisticsGroup) GetQueueDuration() *DurationSummary {
+	if x != nil {
+		return x.QueueDuration
+	}
+	return nil
+}
+
+func (x *StatisticsGroup) GetDispatchDuration() *DurationSummary {
+	if x != nil {
+		return x.DispatchDuration
+	}
+	return nil
+}
+
+func (x *StatisticsGroup) GetRunDuration() *DurationSummary {
+	if x != nil {
+		return x.RunDuration
+	}
+	return nil
+}
+
+func (x *StatisticsGroup) GetDirectCosts() []*CostTotal {
+	if x != nil {
+		return x.DirectCosts
+	}
+	return nil
+}
+
+type FleetCostTotal struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Tier           string                 `protobuf:"bytes,1,opt,name=tier,proto3" json:"tier,omitempty"`
+	Provider       string                 `protobuf:"bytes,2,opt,name=provider,proto3" json:"provider,omitempty"`
+	Day            string                 `protobuf:"bytes,3,opt,name=day,proto3" json:"day,omitempty"`
+	Kind           string                 `protobuf:"bytes,4,opt,name=kind,proto3" json:"kind,omitempty"`
+	Currency       string                 `protobuf:"bytes,5,opt,name=currency,proto3" json:"currency,omitempty"`
+	Nanos          int64                  `protobuf:"varint,6,opt,name=nanos,proto3" json:"nanos,omitempty"`
+	Entries        int64                  `protobuf:"varint,7,opt,name=entries,proto3" json:"entries,omitempty"`
+	UnknownEntries int64                  `protobuf:"varint,8,opt,name=unknown_entries,json=unknownEntries,proto3" json:"unknown_entries,omitempty"`
+	Estimated      bool                   `protobuf:"varint,9,opt,name=estimated,proto3" json:"estimated,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *FleetCostTotal) Reset() {
+	*x = FleetCostTotal{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FleetCostTotal) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FleetCostTotal) ProtoMessage() {}
+
+func (x *FleetCostTotal) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FleetCostTotal.ProtoReflect.Descriptor instead.
+func (*FleetCostTotal) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *FleetCostTotal) GetTier() string {
+	if x != nil {
+		return x.Tier
+	}
+	return ""
+}
+
+func (x *FleetCostTotal) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *FleetCostTotal) GetDay() string {
+	if x != nil {
+		return x.Day
+	}
+	return ""
+}
+
+func (x *FleetCostTotal) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *FleetCostTotal) GetCurrency() string {
+	if x != nil {
+		return x.Currency
+	}
+	return ""
+}
+
+func (x *FleetCostTotal) GetNanos() int64 {
+	if x != nil {
+		return x.Nanos
+	}
+	return 0
+}
+
+func (x *FleetCostTotal) GetEntries() int64 {
+	if x != nil {
+		return x.Entries
+	}
+	return 0
+}
+
+func (x *FleetCostTotal) GetUnknownEntries() int64 {
+	if x != nil {
+		return x.UnknownEntries
+	}
+	return 0
+}
+
+func (x *FleetCostTotal) GetEstimated() bool {
+	if x != nil {
+		return x.Estimated
+	}
+	return false
+}
+
+type FleetTimingTotal struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Tier          string                 `protobuf:"bytes,1,opt,name=tier,proto3" json:"tier,omitempty"`
+	Provider      string                 `protobuf:"bytes,2,opt,name=provider,proto3" json:"provider,omitempty"`
+	Day           string                 `protobuf:"bytes,3,opt,name=day,proto3" json:"day,omitempty"`
+	Kind          string                 `protobuf:"bytes,4,opt,name=kind,proto3" json:"kind,omitempty"`
+	Duration      *DurationSummary       `protobuf:"bytes,5,opt,name=duration,proto3" json:"duration,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FleetTimingTotal) Reset() {
+	*x = FleetTimingTotal{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FleetTimingTotal) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FleetTimingTotal) ProtoMessage() {}
+
+func (x *FleetTimingTotal) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FleetTimingTotal.ProtoReflect.Descriptor instead.
+func (*FleetTimingTotal) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *FleetTimingTotal) GetTier() string {
+	if x != nil {
+		return x.Tier
+	}
+	return ""
+}
+
+func (x *FleetTimingTotal) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *FleetTimingTotal) GetDay() string {
+	if x != nil {
+		return x.Day
+	}
+	return ""
+}
+
+func (x *FleetTimingTotal) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *FleetTimingTotal) GetDuration() *DurationSummary {
+	if x != nil {
+		return x.Duration
+	}
+	return nil
+}
+
+type RoutingSelection struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Tier          string                 `protobuf:"bytes,1,opt,name=tier,proto3" json:"tier,omitempty"`
+	Provider      string                 `protobuf:"bytes,2,opt,name=provider,proto3" json:"provider,omitempty"`
+	Jobs          int64                  `protobuf:"varint,3,opt,name=jobs,proto3" json:"jobs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RoutingSelection) Reset() {
+	*x = RoutingSelection{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[40]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RoutingSelection) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RoutingSelection) ProtoMessage() {}
+
+func (x *RoutingSelection) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[40]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RoutingSelection.ProtoReflect.Descriptor instead.
+func (*RoutingSelection) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{40}
+}
+
+func (x *RoutingSelection) GetTier() string {
+	if x != nil {
+		return x.Tier
+	}
+	return ""
+}
+
+func (x *RoutingSelection) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *RoutingSelection) GetJobs() int64 {
+	if x != nil {
+		return x.Jobs
+	}
+	return 0
+}
+
+type RoutingEffectiveness struct {
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	Route                  string                 `protobuf:"bytes,1,opt,name=route,proto3" json:"route,omitempty"`
+	RequiredLabel          string                 `protobuf:"bytes,2,opt,name=required_label,json=requiredLabel,proto3" json:"required_label,omitempty"`
+	Currency               string                 `protobuf:"bytes,3,opt,name=currency,proto3" json:"currency,omitempty"`
+	Decisions              int64                  `protobuf:"varint,4,opt,name=decisions,proto3" json:"decisions,omitempty"`
+	Completed              int64                  `protobuf:"varint,5,opt,name=completed,proto3" json:"completed,omitempty"`
+	FallbackDecisions      int64                  `protobuf:"varint,6,opt,name=fallback_decisions,json=fallbackDecisions,proto3" json:"fallback_decisions,omitempty"`
+	HistoryDecisions       int64                  `protobuf:"varint,7,opt,name=history_decisions,json=historyDecisions,proto3" json:"history_decisions,omitempty"`
+	IdleDecisions          int64                  `protobuf:"varint,8,opt,name=idle_decisions,json=idleDecisions,proto3" json:"idle_decisions,omitempty"`
+	DeferredDecisions      int64                  `protobuf:"varint,9,opt,name=deferred_decisions,json=deferredDecisions,proto3" json:"deferred_decisions,omitempty"`
+	P95Hits                int64                  `protobuf:"varint,10,opt,name=p95_hits,json=p95Hits,proto3" json:"p95_hits,omitempty"`
+	P95Misses              int64                  `protobuf:"varint,11,opt,name=p95_misses,json=p95Misses,proto3" json:"p95_misses,omitempty"`
+	EstimatedSelectedNanos int64                  `protobuf:"varint,12,opt,name=estimated_selected_nanos,json=estimatedSelectedNanos,proto3" json:"estimated_selected_nanos,omitempty"`
+	EstimatedFallbackNanos int64                  `protobuf:"varint,13,opt,name=estimated_fallback_nanos,json=estimatedFallbackNanos,proto3" json:"estimated_fallback_nanos,omitempty"`
+	EstimatedSavingsNanos  int64                  `protobuf:"varint,14,opt,name=estimated_savings_nanos,json=estimatedSavingsNanos,proto3" json:"estimated_savings_nanos,omitempty"`
+	ActualDirectNanos      int64                  `protobuf:"varint,15,opt,name=actual_direct_nanos,json=actualDirectNanos,proto3" json:"actual_direct_nanos,omitempty"`
+	ActualUnknownEntries   int64                  `protobuf:"varint,16,opt,name=actual_unknown_entries,json=actualUnknownEntries,proto3" json:"actual_unknown_entries,omitempty"`
+	Selections             []*RoutingSelection    `protobuf:"bytes,17,rep,name=selections,proto3" json:"selections,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *RoutingEffectiveness) Reset() {
+	*x = RoutingEffectiveness{}
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[41]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RoutingEffectiveness) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RoutingEffectiveness) ProtoMessage() {}
+
+func (x *RoutingEffectiveness) ProtoReflect() protoreflect.Message {
+	mi := &file_fjbellows_control_v1_control_proto_msgTypes[41]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RoutingEffectiveness.ProtoReflect.Descriptor instead.
+func (*RoutingEffectiveness) Descriptor() ([]byte, []int) {
+	return file_fjbellows_control_v1_control_proto_rawDescGZIP(), []int{41}
+}
+
+func (x *RoutingEffectiveness) GetRoute() string {
+	if x != nil {
+		return x.Route
+	}
+	return ""
+}
+
+func (x *RoutingEffectiveness) GetRequiredLabel() string {
+	if x != nil {
+		return x.RequiredLabel
+	}
+	return ""
+}
+
+func (x *RoutingEffectiveness) GetCurrency() string {
+	if x != nil {
+		return x.Currency
+	}
+	return ""
+}
+
+func (x *RoutingEffectiveness) GetDecisions() int64 {
+	if x != nil {
+		return x.Decisions
+	}
+	return 0
+}
+
+func (x *RoutingEffectiveness) GetCompleted() int64 {
+	if x != nil {
+		return x.Completed
+	}
+	return 0
+}
+
+func (x *RoutingEffectiveness) GetFallbackDecisions() int64 {
+	if x != nil {
+		return x.FallbackDecisions
+	}
+	return 0
+}
+
+func (x *RoutingEffectiveness) GetHistoryDecisions() int64 {
+	if x != nil {
+		return x.HistoryDecisions
+	}
+	return 0
+}
+
+func (x *RoutingEffectiveness) GetIdleDecisions() int64 {
+	if x != nil {
+		return x.IdleDecisions
+	}
+	return 0
+}
+
+func (x *RoutingEffectiveness) GetDeferredDecisions() int64 {
+	if x != nil {
+		return x.DeferredDecisions
+	}
+	return 0
+}
+
+func (x *RoutingEffectiveness) GetP95Hits() int64 {
+	if x != nil {
+		return x.P95Hits
+	}
+	return 0
+}
+
+func (x *RoutingEffectiveness) GetP95Misses() int64 {
+	if x != nil {
+		return x.P95Misses
+	}
+	return 0
+}
+
+func (x *RoutingEffectiveness) GetEstimatedSelectedNanos() int64 {
+	if x != nil {
+		return x.EstimatedSelectedNanos
+	}
+	return 0
+}
+
+func (x *RoutingEffectiveness) GetEstimatedFallbackNanos() int64 {
+	if x != nil {
+		return x.EstimatedFallbackNanos
+	}
+	return 0
+}
+
+func (x *RoutingEffectiveness) GetEstimatedSavingsNanos() int64 {
+	if x != nil {
+		return x.EstimatedSavingsNanos
+	}
+	return 0
+}
+
+func (x *RoutingEffectiveness) GetActualDirectNanos() int64 {
+	if x != nil {
+		return x.ActualDirectNanos
+	}
+	return 0
+}
+
+func (x *RoutingEffectiveness) GetActualUnknownEntries() int64 {
+	if x != nil {
+		return x.ActualUnknownEntries
+	}
+	return 0
+}
+
+func (x *RoutingEffectiveness) GetSelections() []*RoutingSelection {
+	if x != nil {
+		return x.Selections
+	}
+	return nil
+}
+
 var File_fjbellows_control_v1_control_proto protoreflect.FileDescriptor
 
 const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\n" +
-	"\"fjbellows/control/v1/control.proto\x12\x14fjbellows.control.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x0f\n" +
-	"\rHealthRequest\"\x9c\x02\n" +
+	"\"fjbellows/control/v1/control.proto\x12\x14fjbellows.control.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1egoogle/protobuf/duration.proto\"\x0f\n" +
+	"\rHealthRequest\"\x90\x06\n" +
 	"\x0eHealthResponse\x12\x18\n" +
 	"\ahealthy\x18\x01 \x01(\bR\ahealthy\x12<\n" +
 	"\flast_tick_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"lastTickAt\x12M\n" +
 	"\x15last_provider_list_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x12lastProviderListAt\x12K\n" +
 	"\x14last_forgejo_poll_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\x11lastForgejoPollAt\x12\x16\n" +
-	"\x06paused\x18\x05 \x01(\bR\x06paused\"\x14\n" +
-	"\x12ListWorkersRequest\"M\n" +
+	"\x06paused\x18\x05 \x01(\bR\x06paused\x12)\n" +
+	"\x10database_healthy\x18\x06 \x01(\bR\x0fdatabaseHealthy\x12d\n" +
+	"!database_last_successful_write_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\x1ddatabaseLastSuccessfulWriteAt\x12.\n" +
+	"\x13database_last_error\x18\b \x01(\tR\x11databaseLastError\x12'\n" +
+	"\x0frouting_healthy\x18\t \x01(\bR\x0eroutingHealthy\x12K\n" +
+	"\x14routing_last_poll_at\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\x11routingLastPollAt\x12S\n" +
+	"\x18routing_last_decision_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\x15routingLastDecisionAt\x12,\n" +
+	"\x12routing_last_error\x18\f \x01(\tR\x10routingLastError\x128\n" +
+	"\x18routing_degraded_pricing\x18\r \x01(\bR\x16routingDegradedPricing\"D\n" +
+	"\x12ListWorkersRequest\x12\x12\n" +
+	"\x04tier\x18\x01 \x01(\tR\x04tier\x12\x1a\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\"M\n" +
 	"\x13ListWorkersResponse\x126\n" +
-	"\aworkers\x18\x01 \x03(\v2\x1c.fjbellows.control.v1.WorkerR\aworkers\"\xab\x03\n" +
+	"\aworkers\x18\x01 \x03(\v2\x1c.fjbellows.control.v1.WorkerR\aworkers\"\xf3\x03\n" +
 	"\x06Worker\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
 	"instanceId\x12\x14\n" +
@@ -1639,8 +3200,12 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"currentJob\x12C\n" +
 	"\x10paid_hour_end_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\rpaidHourEndAt\x12D\n" +
 	"\x10reap_eligible_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\x0ereapEligibleAt\x12#\n" +
-	"\rbilling_model\x18\t \x01(\tR\fbillingModel\"\x11\n" +
-	"\x0fGetCacheRequest\"\xee\x01\n" +
+	"\rbilling_model\x18\t \x01(\tR\fbillingModel\x12\x12\n" +
+	"\x04tier\x18\v \x01(\tR\x04tier\x12\x1a\n" +
+	"\bprovider\x18\f \x01(\tR\bprovider\x12\x16\n" +
+	"\x06driver\x18\r \x01(\tR\x06driver\"-\n" +
+	"\x0fGetCacheRequest\x12\x1a\n" +
+	"\bprovider\x18\x01 \x01(\tR\bprovider\"\xee\x01\n" +
 	"\x10GetCacheResponse\x12\x18\n" +
 	"\apresent\x18\x01 \x01(\bR\apresent\x12)\n" +
 	"\x10adopted_existing\x18\x02 \x01(\bR\x0fadoptedExisting\x12\x1b\n" +
@@ -1658,30 +3223,35 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\x06reaped\x18\x03 \x01(\x05R\x06reaped\x12\x18\n" +
 	"\aadopted\x18\x04 \x01(\x05R\aadopted\x12\x18\n" +
 	"\adropped\x18\x05 \x01(\x05R\adropped\x12\x16\n" +
-	"\x06errors\x18\x06 \x03(\tR\x06errors\"3\n" +
+	"\x06errors\x18\x06 \x03(\tR\x06errors\"G\n" +
 	"\x10ForceReapRequest\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
-	"instanceId\"\x13\n" +
-	"\x11ForceReapResponse\"\x17\n" +
-	"\x15ForceProvisionRequest\"9\n" +
+	"instanceId\x12\x12\n" +
+	"\x04tier\x18\x02 \x01(\tR\x04tier\"\x13\n" +
+	"\x11ForceReapResponse\"+\n" +
+	"\x15ForceProvisionRequest\x12\x12\n" +
+	"\x04tier\x18\x01 \x01(\tR\x04tier\"9\n" +
 	"\x16ForceProvisionResponse\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
 	"instanceId\"\x0e\n" +
 	"\fPauseRequest\"\x0f\n" +
 	"\rPauseResponse\"\x0f\n" +
 	"\rResumeRequest\"\x10\n" +
-	"\x0eResumeResponse\"P\n" +
+	"\x0eResumeResponse\"d\n" +
 	"\x13ExecOnWorkerRequest\x12\x1f\n" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
 	"instanceId\x12\x18\n" +
-	"\acommand\x18\x02 \x01(\tR\acommand\"\xb9\x01\n" +
+	"\acommand\x18\x02 \x01(\tR\acommand\x12\x12\n" +
+	"\x04tier\x18\x03 \x01(\tR\x04tier\"\xb9\x01\n" +
 	"\x14ExecOnWorkerResponse\x12\x16\n" +
 	"\x06stdout\x18\x01 \x01(\fR\x06stdout\x12\x16\n" +
 	"\x06stderr\x18\x02 \x01(\fR\x06stderr\x12\x1b\n" +
 	"\texit_code\x18\x03 \x01(\x05R\bexitCode\x12)\n" +
 	"\x10truncated_stdout\x18\x04 \x01(\x03R\x0ftruncatedStdout\x12)\n" +
-	"\x10truncated_stderr\x18\x05 \x01(\x03R\x0ftruncatedStderr\"\x15\n" +
-	"\x13StreamEventsRequest\"\xdd\x01\n" +
+	"\x10truncated_stderr\x18\x05 \x01(\x03R\x0ftruncatedStderr\"E\n" +
+	"\x13StreamEventsRequest\x12\x12\n" +
+	"\x04tier\x18\x01 \x01(\tR\x04tier\x12\x1a\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\"\xdd\x01\n" +
 	"\x14StreamEventsResponse\x12*\n" +
 	"\x02at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12K\n" +
@@ -1702,8 +3272,9 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\vinstance_id\x18\x01 \x01(\tR\n" +
 	"instanceId\x12\x16\n" +
 	"\x06handle\x18\x02 \x01(\tR\x06handle\x12#\n" +
-	"\rhistory_lines\x18\x03 \x01(\x05R\fhistoryLines\"\x15\n" +
-	"\x13ProviderInfoRequest\"\xb5\x01\n" +
+	"\rhistory_lines\x18\x03 \x01(\x05R\fhistoryLines\"1\n" +
+	"\x13ProviderInfoRequest\x12\x1a\n" +
+	"\bprovider\x18\x01 \x01(\tR\bprovider\"\xb5\x01\n" +
 	"\x14ProviderInfoResponse\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12H\n" +
 	"\x04info\x18\x02 \x03(\v24.fjbellows.control.v1.ProviderInfoResponse.InfoEntryR\x04info\x1a7\n" +
@@ -1718,8 +3289,155 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"AttrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\xd3\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa1\x02\n" +
+	"\x11JobHistoryRequest\x12.\n" +
+	"\x04from\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x04from\x12*\n" +
+	"\x02to\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x02to\x12\x12\n" +
+	"\x04tier\x18\x03 \x01(\tR\x04tier\x12\x1a\n" +
+	"\bprovider\x18\x04 \x01(\tR\bprovider\x12\x1e\n" +
 	"\n" +
+	"repository\x18\x05 \x01(\tR\n" +
+	"repository\x12\x1a\n" +
+	"\bworkflow\x18\x06 \x01(\tR\bworkflow\x12\x16\n" +
+	"\x06status\x18\a \x01(\tR\x06status\x12\x14\n" +
+	"\x05limit\x18\b \x01(\x05R\x05limit\x12\x16\n" +
+	"\x06cursor\x18\t \x01(\tR\x06cursor\"d\n" +
+	"\x12JobHistoryResponse\x12-\n" +
+	"\x04jobs\x18\x01 \x03(\v2\x19.fjbellows.control.v1.JobR\x04jobs\x12\x1f\n" +
+	"\vnext_cursor\x18\x02 \x01(\tR\n" +
+	"nextCursor\"\x93\a\n" +
+	"\x03Job\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x16\n" +
+	"\x06source\x18\x02 \x01(\tR\x06source\x12\x16\n" +
+	"\x06handle\x18\x03 \x01(\tR\x06handle\x12$\n" +
+	"\x0eforgejo_job_id\x18\x04 \x01(\x03R\fforgejoJobId\x12\x18\n" +
+	"\aattempt\x18\x05 \x01(\x03R\aattempt\x12#\n" +
+	"\rrepository_id\x18\x06 \x01(\x03R\frepositoryId\x12\x1e\n" +
+	"\n" +
+	"repository\x18\a \x01(\tR\n" +
+	"repository\x12\x1a\n" +
+	"\bworkflow\x18\b \x01(\tR\bworkflow\x12#\n" +
+	"\rworkflow_file\x18\t \x01(\tR\fworkflowFile\x12\x19\n" +
+	"\bjob_name\x18\n" +
+	" \x01(\tR\ajobName\x12)\n" +
+	"\x10identity_quality\x18\v \x01(\tR\x0fidentityQuality\x12\x12\n" +
+	"\x04tier\x18\f \x01(\tR\x04tier\x12\x1a\n" +
+	"\bprovider\x18\r \x01(\tR\bprovider\x12\x16\n" +
+	"\x06driver\x18\x0e \x01(\tR\x06driver\x12\x16\n" +
+	"\x06status\x18\x0f \x01(\tR\x06status\x12\x1e\n" +
+	"\n" +
+	"conclusion\x18\x10 \x01(\tR\n" +
+	"conclusion\x125\n" +
+	"\x16infrastructure_failure\x18\x11 \x01(\tR\x15infrastructureFailure\x12>\n" +
+	"\rfirst_seen_at\x18\x12 \x01(\v2\x1a.google.protobuf.TimestampR\vfirstSeenAt\x127\n" +
+	"\tqueued_at\x18\x13 \x01(\v2\x1a.google.protobuf.TimestampR\bqueuedAt\x12?\n" +
+	"\rdispatched_at\x18\x14 \x01(\v2\x1a.google.protobuf.TimestampR\fdispatchedAt\x12F\n" +
+	"\x11runner_started_at\x18\x15 \x01(\v2\x1a.google.protobuf.TimestampR\x0frunnerStartedAt\x12H\n" +
+	"\x12runner_finished_at\x18\x16 \x01(\v2\x1a.google.protobuf.TimestampR\x10runnerFinishedAt\x12=\n" +
+	"\fcompleted_at\x18\x17 \x01(\v2\x1a.google.protobuf.TimestampR\vcompletedAt\"\x8c\x02\n" +
+	"\x11StatisticsRequest\x12.\n" +
+	"\x04from\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x04from\x12*\n" +
+	"\x02to\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x02to\x12\x12\n" +
+	"\x04tier\x18\x03 \x01(\tR\x04tier\x12\x1a\n" +
+	"\bprovider\x18\x04 \x01(\tR\bprovider\x12\x1e\n" +
+	"\n" +
+	"repository\x18\x05 \x01(\tR\n" +
+	"repository\x12\x1a\n" +
+	"\bworkflow\x18\x06 \x01(\tR\bworkflow\x12\x19\n" +
+	"\bgroup_by\x18\a \x01(\tR\agroupBy\x12\x14\n" +
+	"\x05route\x18\b \x01(\tR\x05route\"\xc8\x02\n" +
+	"\x12StatisticsResponse\x12=\n" +
+	"\x06groups\x18\x01 \x03(\v2%.fjbellows.control.v1.StatisticsGroupR\x06groups\x12E\n" +
+	"\vfleet_costs\x18\x02 \x03(\v2$.fjbellows.control.v1.FleetCostTotalR\n" +
+	"fleetCosts\x12K\n" +
+	"\rfleet_timings\x18\x03 \x03(\v2&.fjbellows.control.v1.FleetTimingTotalR\ffleetTimings\x12_\n" +
+	"\x15routing_effectiveness\x18\x04 \x03(\v2*.fjbellows.control.v1.RoutingEffectivenessR\x14routingEffectiveness\"\xca\x01\n" +
+	"\rStatisticsKey\x12\x16\n" +
+	"\x06source\x18\x01 \x01(\tR\x06source\x12#\n" +
+	"\rrepository_id\x18\x02 \x01(\x03R\frepositoryId\x12\x1e\n" +
+	"\n" +
+	"repository\x18\x03 \x01(\tR\n" +
+	"repository\x12\x1a\n" +
+	"\bworkflow\x18\x04 \x01(\tR\bworkflow\x12\x12\n" +
+	"\x04tier\x18\x05 \x01(\tR\x04tier\x12\x1a\n" +
+	"\bprovider\x18\x06 \x01(\tR\bprovider\x12\x10\n" +
+	"\x03day\x18\a \x01(\tR\x03day\"\x8c\x02\n" +
+	"\x0fDurationSummary\x12\x14\n" +
+	"\x05count\x18\x01 \x01(\x03R\x05count\x12/\n" +
+	"\x05total\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\x05total\x12+\n" +
+	"\x03min\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\x03min\x12+\n" +
+	"\x03max\x18\x04 \x01(\v2\x19.google.protobuf.DurationR\x03max\x12+\n" +
+	"\x03p50\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\x03p50\x12+\n" +
+	"\x03p95\x18\x06 \x01(\v2\x19.google.protobuf.DurationR\x03p95\"\xb2\x01\n" +
+	"\tCostTotal\x12\x12\n" +
+	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x1a\n" +
+	"\bcurrency\x18\x02 \x01(\tR\bcurrency\x12\x14\n" +
+	"\x05nanos\x18\x03 \x01(\x03R\x05nanos\x12\x18\n" +
+	"\aentries\x18\x04 \x01(\x03R\aentries\x12'\n" +
+	"\x0funknown_entries\x18\x05 \x01(\x03R\x0eunknownEntries\x12\x1c\n" +
+	"\testimated\x18\x06 \x01(\bR\testimated\"\xc4\x05\n" +
+	"\x0fStatisticsGroup\x125\n" +
+	"\x03key\x18\x01 \x01(\v2#.fjbellows.control.v1.StatisticsKeyR\x03key\x12\x12\n" +
+	"\x04jobs\x18\x02 \x01(\x03R\x04jobs\x12\x1c\n" +
+	"\tcompleted\x18\x03 \x01(\x03R\tcompleted\x12\x1c\n" +
+	"\tsucceeded\x18\x04 \x01(\x03R\tsucceeded\x12\x16\n" +
+	"\x06failed\x18\x05 \x01(\x03R\x06failed\x12\x1c\n" +
+	"\tcancelled\x18\x06 \x01(\x03R\tcancelled\x12\x18\n" +
+	"\askipped\x18\a \x01(\x03R\askipped\x12!\n" +
+	"\finfra_failed\x18\b \x01(\x03R\vinfraFailed\x12 \n" +
+	"\vinterrupted\x18\t \x01(\x03R\vinterrupted\x12\x1f\n" +
+	"\vin_progress\x18\n" +
+	" \x01(\x03R\n" +
+	"inProgress\x12\x1f\n" +
+	"\vpriced_jobs\x18\v \x01(\x03R\n" +
+	"pricedJobs\x12#\n" +
+	"\runpriced_jobs\x18\f \x01(\x03R\funpricedJobs\x12L\n" +
+	"\x0equeue_duration\x18\r \x01(\v2%.fjbellows.control.v1.DurationSummaryR\rqueueDuration\x12R\n" +
+	"\x11dispatch_duration\x18\x0e \x01(\v2%.fjbellows.control.v1.DurationSummaryR\x10dispatchDuration\x12H\n" +
+	"\frun_duration\x18\x0f \x01(\v2%.fjbellows.control.v1.DurationSummaryR\vrunDuration\x12B\n" +
+	"\fdirect_costs\x18\x10 \x03(\v2\x1f.fjbellows.control.v1.CostTotalR\vdirectCosts\"\xf9\x01\n" +
+	"\x0eFleetCostTotal\x12\x12\n" +
+	"\x04tier\x18\x01 \x01(\tR\x04tier\x12\x1a\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x10\n" +
+	"\x03day\x18\x03 \x01(\tR\x03day\x12\x12\n" +
+	"\x04kind\x18\x04 \x01(\tR\x04kind\x12\x1a\n" +
+	"\bcurrency\x18\x05 \x01(\tR\bcurrency\x12\x14\n" +
+	"\x05nanos\x18\x06 \x01(\x03R\x05nanos\x12\x18\n" +
+	"\aentries\x18\a \x01(\x03R\aentries\x12'\n" +
+	"\x0funknown_entries\x18\b \x01(\x03R\x0eunknownEntries\x12\x1c\n" +
+	"\testimated\x18\t \x01(\bR\testimated\"\xab\x01\n" +
+	"\x10FleetTimingTotal\x12\x12\n" +
+	"\x04tier\x18\x01 \x01(\tR\x04tier\x12\x1a\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x10\n" +
+	"\x03day\x18\x03 \x01(\tR\x03day\x12\x12\n" +
+	"\x04kind\x18\x04 \x01(\tR\x04kind\x12A\n" +
+	"\bduration\x18\x05 \x01(\v2%.fjbellows.control.v1.DurationSummaryR\bduration\"V\n" +
+	"\x10RoutingSelection\x12\x12\n" +
+	"\x04tier\x18\x01 \x01(\tR\x04tier\x12\x1a\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x12\n" +
+	"\x04jobs\x18\x03 \x01(\x03R\x04jobs\"\xf1\x05\n" +
+	"\x14RoutingEffectiveness\x12\x14\n" +
+	"\x05route\x18\x01 \x01(\tR\x05route\x12%\n" +
+	"\x0erequired_label\x18\x02 \x01(\tR\rrequiredLabel\x12\x1a\n" +
+	"\bcurrency\x18\x03 \x01(\tR\bcurrency\x12\x1c\n" +
+	"\tdecisions\x18\x04 \x01(\x03R\tdecisions\x12\x1c\n" +
+	"\tcompleted\x18\x05 \x01(\x03R\tcompleted\x12-\n" +
+	"\x12fallback_decisions\x18\x06 \x01(\x03R\x11fallbackDecisions\x12+\n" +
+	"\x11history_decisions\x18\a \x01(\x03R\x10historyDecisions\x12%\n" +
+	"\x0eidle_decisions\x18\b \x01(\x03R\ridleDecisions\x12-\n" +
+	"\x12deferred_decisions\x18\t \x01(\x03R\x11deferredDecisions\x12\x19\n" +
+	"\bp95_hits\x18\n" +
+	" \x01(\x03R\ap95Hits\x12\x1d\n" +
+	"\n" +
+	"p95_misses\x18\v \x01(\x03R\tp95Misses\x128\n" +
+	"\x18estimated_selected_nanos\x18\f \x01(\x03R\x16estimatedSelectedNanos\x128\n" +
+	"\x18estimated_fallback_nanos\x18\r \x01(\x03R\x16estimatedFallbackNanos\x126\n" +
+	"\x17estimated_savings_nanos\x18\x0e \x01(\x03R\x15estimatedSavingsNanos\x12.\n" +
+	"\x13actual_direct_nanos\x18\x0f \x01(\x03R\x11actualDirectNanos\x124\n" +
+	"\x16actual_unknown_entries\x18\x10 \x01(\x03R\x14actualUnknownEntries\x12F\n" +
+	"\n" +
+	"selections\x18\x11 \x03(\v2&.fjbellows.control.v1.RoutingSelectionR\n" +
+	"selections2\x95\f\n" +
 	"\x0eControlService\x12S\n" +
 	"\x06Health\x12#.fjbellows.control.v1.HealthRequest\x1a$.fjbellows.control.v1.HealthResponse\x12b\n" +
 	"\vListWorkers\x12(.fjbellows.control.v1.ListWorkersRequest\x1a).fjbellows.control.v1.ListWorkersResponse\x12Y\n" +
@@ -1735,7 +3453,11 @@ const file_fjbellows_control_v1_control_proto_rawDesc = "" +
 	"\fExecOnWorker\x12).fjbellows.control.v1.ExecOnWorkerRequest\x1a*.fjbellows.control.v1.ExecOnWorkerResponse\x12a\n" +
 	"\n" +
 	"StreamLogs\x12'.fjbellows.control.v1.StreamLogsRequest\x1a(.fjbellows.control.v1.StreamLogsResponse0\x01\x12e\n" +
-	"\fProviderInfo\x12).fjbellows.control.v1.ProviderInfoRequest\x1a*.fjbellows.control.v1.ProviderInfoResponseB\xdb\x01\n" +
+	"\fProviderInfo\x12).fjbellows.control.v1.ProviderInfoRequest\x1a*.fjbellows.control.v1.ProviderInfoResponse\x12_\n" +
+	"\n" +
+	"JobHistory\x12'.fjbellows.control.v1.JobHistoryRequest\x1a(.fjbellows.control.v1.JobHistoryResponse\x12_\n" +
+	"\n" +
+	"Statistics\x12'.fjbellows.control.v1.StatisticsRequest\x1a(.fjbellows.control.v1.StatisticsResponseB\xdb\x01\n" +
 	"\x18com.fjbellows.control.v1B\fControlProtoP\x01Z?github.com/hstern/fj-bellows/gen/fjbellows/control/v1;controlv1\xa2\x02\x03FCX\xaa\x02\x14Fjbellows.Control.V1\xca\x02\x14Fjbellows\\Control\\V1\xe2\x02 Fjbellows\\Control\\V1\\GPBMetadata\xea\x02\x16Fjbellows::Control::V1b\x06proto3"
 
 var (
@@ -1750,7 +3472,7 @@ func file_fjbellows_control_v1_control_proto_rawDescGZIP() []byte {
 	return file_fjbellows_control_v1_control_proto_rawDescData
 }
 
-var file_fjbellows_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
+var file_fjbellows_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 45)
 var file_fjbellows_control_v1_control_proto_goTypes = []any{
 	(*HealthRequest)(nil),          // 0: fjbellows.control.v1.HealthRequest
 	(*HealthResponse)(nil),         // 1: fjbellows.control.v1.HealthResponse
@@ -1781,58 +3503,106 @@ var file_fjbellows_control_v1_control_proto_goTypes = []any{
 	(*ProviderInfoRequest)(nil),    // 26: fjbellows.control.v1.ProviderInfoRequest
 	(*ProviderInfoResponse)(nil),   // 27: fjbellows.control.v1.ProviderInfoResponse
 	(*StreamLogsResponse)(nil),     // 28: fjbellows.control.v1.StreamLogsResponse
-	nil,                            // 29: fjbellows.control.v1.StreamEventsResponse.AttrsEntry
-	nil,                            // 30: fjbellows.control.v1.ProviderInfoResponse.InfoEntry
-	nil,                            // 31: fjbellows.control.v1.StreamLogsResponse.AttrsEntry
-	(*timestamppb.Timestamp)(nil),  // 32: google.protobuf.Timestamp
+	(*JobHistoryRequest)(nil),      // 29: fjbellows.control.v1.JobHistoryRequest
+	(*JobHistoryResponse)(nil),     // 30: fjbellows.control.v1.JobHistoryResponse
+	(*Job)(nil),                    // 31: fjbellows.control.v1.Job
+	(*StatisticsRequest)(nil),      // 32: fjbellows.control.v1.StatisticsRequest
+	(*StatisticsResponse)(nil),     // 33: fjbellows.control.v1.StatisticsResponse
+	(*StatisticsKey)(nil),          // 34: fjbellows.control.v1.StatisticsKey
+	(*DurationSummary)(nil),        // 35: fjbellows.control.v1.DurationSummary
+	(*CostTotal)(nil),              // 36: fjbellows.control.v1.CostTotal
+	(*StatisticsGroup)(nil),        // 37: fjbellows.control.v1.StatisticsGroup
+	(*FleetCostTotal)(nil),         // 38: fjbellows.control.v1.FleetCostTotal
+	(*FleetTimingTotal)(nil),       // 39: fjbellows.control.v1.FleetTimingTotal
+	(*RoutingSelection)(nil),       // 40: fjbellows.control.v1.RoutingSelection
+	(*RoutingEffectiveness)(nil),   // 41: fjbellows.control.v1.RoutingEffectiveness
+	nil,                            // 42: fjbellows.control.v1.StreamEventsResponse.AttrsEntry
+	nil,                            // 43: fjbellows.control.v1.ProviderInfoResponse.InfoEntry
+	nil,                            // 44: fjbellows.control.v1.StreamLogsResponse.AttrsEntry
+	(*timestamppb.Timestamp)(nil),  // 45: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),    // 46: google.protobuf.Duration
 }
 var file_fjbellows_control_v1_control_proto_depIdxs = []int32{
-	32, // 0: fjbellows.control.v1.HealthResponse.last_tick_at:type_name -> google.protobuf.Timestamp
-	32, // 1: fjbellows.control.v1.HealthResponse.last_provider_list_at:type_name -> google.protobuf.Timestamp
-	32, // 2: fjbellows.control.v1.HealthResponse.last_forgejo_poll_at:type_name -> google.protobuf.Timestamp
-	4,  // 3: fjbellows.control.v1.ListWorkersResponse.workers:type_name -> fjbellows.control.v1.Worker
-	32, // 4: fjbellows.control.v1.Worker.created_at:type_name -> google.protobuf.Timestamp
-	32, // 5: fjbellows.control.v1.Worker.last_busy:type_name -> google.protobuf.Timestamp
-	32, // 6: fjbellows.control.v1.Worker.paid_hour_end_at:type_name -> google.protobuf.Timestamp
-	32, // 7: fjbellows.control.v1.Worker.reap_eligible_at:type_name -> google.protobuf.Timestamp
-	32, // 8: fjbellows.control.v1.StreamEventsResponse.at:type_name -> google.protobuf.Timestamp
-	29, // 9: fjbellows.control.v1.StreamEventsResponse.attrs:type_name -> fjbellows.control.v1.StreamEventsResponse.AttrsEntry
-	30, // 10: fjbellows.control.v1.ProviderInfoResponse.info:type_name -> fjbellows.control.v1.ProviderInfoResponse.InfoEntry
-	32, // 11: fjbellows.control.v1.StreamLogsResponse.at:type_name -> google.protobuf.Timestamp
-	31, // 12: fjbellows.control.v1.StreamLogsResponse.attrs:type_name -> fjbellows.control.v1.StreamLogsResponse.AttrsEntry
-	0,  // 13: fjbellows.control.v1.ControlService.Health:input_type -> fjbellows.control.v1.HealthRequest
-	2,  // 14: fjbellows.control.v1.ControlService.ListWorkers:input_type -> fjbellows.control.v1.ListWorkersRequest
-	5,  // 15: fjbellows.control.v1.ControlService.GetCache:input_type -> fjbellows.control.v1.GetCacheRequest
-	7,  // 16: fjbellows.control.v1.ControlService.Reconcile:input_type -> fjbellows.control.v1.ReconcileRequest
-	9,  // 17: fjbellows.control.v1.ControlService.ForceReap:input_type -> fjbellows.control.v1.ForceReapRequest
-	11, // 18: fjbellows.control.v1.ControlService.ForceProvision:input_type -> fjbellows.control.v1.ForceProvisionRequest
-	19, // 19: fjbellows.control.v1.ControlService.StreamEvents:input_type -> fjbellows.control.v1.StreamEventsRequest
-	13, // 20: fjbellows.control.v1.ControlService.Pause:input_type -> fjbellows.control.v1.PauseRequest
-	15, // 21: fjbellows.control.v1.ControlService.Resume:input_type -> fjbellows.control.v1.ResumeRequest
-	21, // 22: fjbellows.control.v1.ControlService.GetConfig:input_type -> fjbellows.control.v1.GetConfigRequest
-	23, // 23: fjbellows.control.v1.ControlService.ReloadConfig:input_type -> fjbellows.control.v1.ReloadConfigRequest
-	17, // 24: fjbellows.control.v1.ControlService.ExecOnWorker:input_type -> fjbellows.control.v1.ExecOnWorkerRequest
-	25, // 25: fjbellows.control.v1.ControlService.StreamLogs:input_type -> fjbellows.control.v1.StreamLogsRequest
-	26, // 26: fjbellows.control.v1.ControlService.ProviderInfo:input_type -> fjbellows.control.v1.ProviderInfoRequest
-	1,  // 27: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
-	3,  // 28: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
-	6,  // 29: fjbellows.control.v1.ControlService.GetCache:output_type -> fjbellows.control.v1.GetCacheResponse
-	8,  // 30: fjbellows.control.v1.ControlService.Reconcile:output_type -> fjbellows.control.v1.ReconcileResponse
-	10, // 31: fjbellows.control.v1.ControlService.ForceReap:output_type -> fjbellows.control.v1.ForceReapResponse
-	12, // 32: fjbellows.control.v1.ControlService.ForceProvision:output_type -> fjbellows.control.v1.ForceProvisionResponse
-	20, // 33: fjbellows.control.v1.ControlService.StreamEvents:output_type -> fjbellows.control.v1.StreamEventsResponse
-	14, // 34: fjbellows.control.v1.ControlService.Pause:output_type -> fjbellows.control.v1.PauseResponse
-	16, // 35: fjbellows.control.v1.ControlService.Resume:output_type -> fjbellows.control.v1.ResumeResponse
-	22, // 36: fjbellows.control.v1.ControlService.GetConfig:output_type -> fjbellows.control.v1.GetConfigResponse
-	24, // 37: fjbellows.control.v1.ControlService.ReloadConfig:output_type -> fjbellows.control.v1.ReloadConfigResponse
-	18, // 38: fjbellows.control.v1.ControlService.ExecOnWorker:output_type -> fjbellows.control.v1.ExecOnWorkerResponse
-	28, // 39: fjbellows.control.v1.ControlService.StreamLogs:output_type -> fjbellows.control.v1.StreamLogsResponse
-	27, // 40: fjbellows.control.v1.ControlService.ProviderInfo:output_type -> fjbellows.control.v1.ProviderInfoResponse
-	27, // [27:41] is the sub-list for method output_type
-	13, // [13:27] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	45, // 0: fjbellows.control.v1.HealthResponse.last_tick_at:type_name -> google.protobuf.Timestamp
+	45, // 1: fjbellows.control.v1.HealthResponse.last_provider_list_at:type_name -> google.protobuf.Timestamp
+	45, // 2: fjbellows.control.v1.HealthResponse.last_forgejo_poll_at:type_name -> google.protobuf.Timestamp
+	45, // 3: fjbellows.control.v1.HealthResponse.database_last_successful_write_at:type_name -> google.protobuf.Timestamp
+	45, // 4: fjbellows.control.v1.HealthResponse.routing_last_poll_at:type_name -> google.protobuf.Timestamp
+	45, // 5: fjbellows.control.v1.HealthResponse.routing_last_decision_at:type_name -> google.protobuf.Timestamp
+	4,  // 6: fjbellows.control.v1.ListWorkersResponse.workers:type_name -> fjbellows.control.v1.Worker
+	45, // 7: fjbellows.control.v1.Worker.created_at:type_name -> google.protobuf.Timestamp
+	45, // 8: fjbellows.control.v1.Worker.last_busy:type_name -> google.protobuf.Timestamp
+	45, // 9: fjbellows.control.v1.Worker.paid_hour_end_at:type_name -> google.protobuf.Timestamp
+	45, // 10: fjbellows.control.v1.Worker.reap_eligible_at:type_name -> google.protobuf.Timestamp
+	45, // 11: fjbellows.control.v1.StreamEventsResponse.at:type_name -> google.protobuf.Timestamp
+	42, // 12: fjbellows.control.v1.StreamEventsResponse.attrs:type_name -> fjbellows.control.v1.StreamEventsResponse.AttrsEntry
+	43, // 13: fjbellows.control.v1.ProviderInfoResponse.info:type_name -> fjbellows.control.v1.ProviderInfoResponse.InfoEntry
+	45, // 14: fjbellows.control.v1.StreamLogsResponse.at:type_name -> google.protobuf.Timestamp
+	44, // 15: fjbellows.control.v1.StreamLogsResponse.attrs:type_name -> fjbellows.control.v1.StreamLogsResponse.AttrsEntry
+	45, // 16: fjbellows.control.v1.JobHistoryRequest.from:type_name -> google.protobuf.Timestamp
+	45, // 17: fjbellows.control.v1.JobHistoryRequest.to:type_name -> google.protobuf.Timestamp
+	31, // 18: fjbellows.control.v1.JobHistoryResponse.jobs:type_name -> fjbellows.control.v1.Job
+	45, // 19: fjbellows.control.v1.Job.first_seen_at:type_name -> google.protobuf.Timestamp
+	45, // 20: fjbellows.control.v1.Job.queued_at:type_name -> google.protobuf.Timestamp
+	45, // 21: fjbellows.control.v1.Job.dispatched_at:type_name -> google.protobuf.Timestamp
+	45, // 22: fjbellows.control.v1.Job.runner_started_at:type_name -> google.protobuf.Timestamp
+	45, // 23: fjbellows.control.v1.Job.runner_finished_at:type_name -> google.protobuf.Timestamp
+	45, // 24: fjbellows.control.v1.Job.completed_at:type_name -> google.protobuf.Timestamp
+	45, // 25: fjbellows.control.v1.StatisticsRequest.from:type_name -> google.protobuf.Timestamp
+	45, // 26: fjbellows.control.v1.StatisticsRequest.to:type_name -> google.protobuf.Timestamp
+	37, // 27: fjbellows.control.v1.StatisticsResponse.groups:type_name -> fjbellows.control.v1.StatisticsGroup
+	38, // 28: fjbellows.control.v1.StatisticsResponse.fleet_costs:type_name -> fjbellows.control.v1.FleetCostTotal
+	39, // 29: fjbellows.control.v1.StatisticsResponse.fleet_timings:type_name -> fjbellows.control.v1.FleetTimingTotal
+	41, // 30: fjbellows.control.v1.StatisticsResponse.routing_effectiveness:type_name -> fjbellows.control.v1.RoutingEffectiveness
+	46, // 31: fjbellows.control.v1.DurationSummary.total:type_name -> google.protobuf.Duration
+	46, // 32: fjbellows.control.v1.DurationSummary.min:type_name -> google.protobuf.Duration
+	46, // 33: fjbellows.control.v1.DurationSummary.max:type_name -> google.protobuf.Duration
+	46, // 34: fjbellows.control.v1.DurationSummary.p50:type_name -> google.protobuf.Duration
+	46, // 35: fjbellows.control.v1.DurationSummary.p95:type_name -> google.protobuf.Duration
+	34, // 36: fjbellows.control.v1.StatisticsGroup.key:type_name -> fjbellows.control.v1.StatisticsKey
+	35, // 37: fjbellows.control.v1.StatisticsGroup.queue_duration:type_name -> fjbellows.control.v1.DurationSummary
+	35, // 38: fjbellows.control.v1.StatisticsGroup.dispatch_duration:type_name -> fjbellows.control.v1.DurationSummary
+	35, // 39: fjbellows.control.v1.StatisticsGroup.run_duration:type_name -> fjbellows.control.v1.DurationSummary
+	36, // 40: fjbellows.control.v1.StatisticsGroup.direct_costs:type_name -> fjbellows.control.v1.CostTotal
+	35, // 41: fjbellows.control.v1.FleetTimingTotal.duration:type_name -> fjbellows.control.v1.DurationSummary
+	40, // 42: fjbellows.control.v1.RoutingEffectiveness.selections:type_name -> fjbellows.control.v1.RoutingSelection
+	0,  // 43: fjbellows.control.v1.ControlService.Health:input_type -> fjbellows.control.v1.HealthRequest
+	2,  // 44: fjbellows.control.v1.ControlService.ListWorkers:input_type -> fjbellows.control.v1.ListWorkersRequest
+	5,  // 45: fjbellows.control.v1.ControlService.GetCache:input_type -> fjbellows.control.v1.GetCacheRequest
+	7,  // 46: fjbellows.control.v1.ControlService.Reconcile:input_type -> fjbellows.control.v1.ReconcileRequest
+	9,  // 47: fjbellows.control.v1.ControlService.ForceReap:input_type -> fjbellows.control.v1.ForceReapRequest
+	11, // 48: fjbellows.control.v1.ControlService.ForceProvision:input_type -> fjbellows.control.v1.ForceProvisionRequest
+	19, // 49: fjbellows.control.v1.ControlService.StreamEvents:input_type -> fjbellows.control.v1.StreamEventsRequest
+	13, // 50: fjbellows.control.v1.ControlService.Pause:input_type -> fjbellows.control.v1.PauseRequest
+	15, // 51: fjbellows.control.v1.ControlService.Resume:input_type -> fjbellows.control.v1.ResumeRequest
+	21, // 52: fjbellows.control.v1.ControlService.GetConfig:input_type -> fjbellows.control.v1.GetConfigRequest
+	23, // 53: fjbellows.control.v1.ControlService.ReloadConfig:input_type -> fjbellows.control.v1.ReloadConfigRequest
+	17, // 54: fjbellows.control.v1.ControlService.ExecOnWorker:input_type -> fjbellows.control.v1.ExecOnWorkerRequest
+	25, // 55: fjbellows.control.v1.ControlService.StreamLogs:input_type -> fjbellows.control.v1.StreamLogsRequest
+	26, // 56: fjbellows.control.v1.ControlService.ProviderInfo:input_type -> fjbellows.control.v1.ProviderInfoRequest
+	29, // 57: fjbellows.control.v1.ControlService.JobHistory:input_type -> fjbellows.control.v1.JobHistoryRequest
+	32, // 58: fjbellows.control.v1.ControlService.Statistics:input_type -> fjbellows.control.v1.StatisticsRequest
+	1,  // 59: fjbellows.control.v1.ControlService.Health:output_type -> fjbellows.control.v1.HealthResponse
+	3,  // 60: fjbellows.control.v1.ControlService.ListWorkers:output_type -> fjbellows.control.v1.ListWorkersResponse
+	6,  // 61: fjbellows.control.v1.ControlService.GetCache:output_type -> fjbellows.control.v1.GetCacheResponse
+	8,  // 62: fjbellows.control.v1.ControlService.Reconcile:output_type -> fjbellows.control.v1.ReconcileResponse
+	10, // 63: fjbellows.control.v1.ControlService.ForceReap:output_type -> fjbellows.control.v1.ForceReapResponse
+	12, // 64: fjbellows.control.v1.ControlService.ForceProvision:output_type -> fjbellows.control.v1.ForceProvisionResponse
+	20, // 65: fjbellows.control.v1.ControlService.StreamEvents:output_type -> fjbellows.control.v1.StreamEventsResponse
+	14, // 66: fjbellows.control.v1.ControlService.Pause:output_type -> fjbellows.control.v1.PauseResponse
+	16, // 67: fjbellows.control.v1.ControlService.Resume:output_type -> fjbellows.control.v1.ResumeResponse
+	22, // 68: fjbellows.control.v1.ControlService.GetConfig:output_type -> fjbellows.control.v1.GetConfigResponse
+	24, // 69: fjbellows.control.v1.ControlService.ReloadConfig:output_type -> fjbellows.control.v1.ReloadConfigResponse
+	18, // 70: fjbellows.control.v1.ControlService.ExecOnWorker:output_type -> fjbellows.control.v1.ExecOnWorkerResponse
+	28, // 71: fjbellows.control.v1.ControlService.StreamLogs:output_type -> fjbellows.control.v1.StreamLogsResponse
+	27, // 72: fjbellows.control.v1.ControlService.ProviderInfo:output_type -> fjbellows.control.v1.ProviderInfoResponse
+	30, // 73: fjbellows.control.v1.ControlService.JobHistory:output_type -> fjbellows.control.v1.JobHistoryResponse
+	33, // 74: fjbellows.control.v1.ControlService.Statistics:output_type -> fjbellows.control.v1.StatisticsResponse
+	59, // [59:75] is the sub-list for method output_type
+	43, // [43:59] is the sub-list for method input_type
+	43, // [43:43] is the sub-list for extension type_name
+	43, // [43:43] is the sub-list for extension extendee
+	0,  // [0:43] is the sub-list for field type_name
 }
 
 func init() { file_fjbellows_control_v1_control_proto_init() }
@@ -1846,7 +3616,7 @@ func file_fjbellows_control_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fjbellows_control_v1_control_proto_rawDesc), len(file_fjbellows_control_v1_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   32,
+			NumMessages:   45,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -71,6 +71,12 @@ const (
 	// ControlServiceProviderInfoProcedure is the fully-qualified name of the ControlService's
 	// ProviderInfo RPC.
 	ControlServiceProviderInfoProcedure = "/fjbellows.control.v1.ControlService/ProviderInfo"
+	// ControlServiceJobHistoryProcedure is the fully-qualified name of the ControlService's JobHistory
+	// RPC.
+	ControlServiceJobHistoryProcedure = "/fjbellows.control.v1.ControlService/JobHistory"
+	// ControlServiceStatisticsProcedure is the fully-qualified name of the ControlService's Statistics
+	// RPC.
+	ControlServiceStatisticsProcedure = "/fjbellows.control.v1.ControlService/Statistics"
 )
 
 // ControlServiceClient is a client for the fjbellows.control.v1.ControlService service.
@@ -113,7 +119,8 @@ type ControlServiceClient interface {
 	// StreamEvents emits state-transition events as they happen:
 	// worker_provisioned, worker_ready, worker_busy, worker_idle,
 	// worker_reaped, worker_adopted, worker_dropped, job_dispatched,
-	// job_complete, zombie_reaped, reconcile_tick. The stream stays open
+	// job_complete, zombie_reaped, reconcile_tick, route_decided, and
+	// route_deferred. The stream stays open
 	// until the client disconnects or the daemon shuts down. Slow clients
 	// are dropped (channel closed) rather than blocking the producer.
 	//
@@ -136,10 +143,10 @@ type ControlServiceClient interface {
 	// parsed config.yaml as the operator intended.
 	GetConfig(context.Context, *connect.Request[v1.GetConfigRequest]) (*connect.Response[v1.GetConfigResponse], error)
 	// ReloadConfig re-reads config.yaml from disk and hot-swaps the
-	// hot-reloadable subset (poll intervals, scale.max, labels, drain
+	// hot-reloadable subset (poll interval, capacity/timers, and drain
 	// settings). Returns CodeFailedPrecondition with a clear error if the
-	// new config changes provider, provider_config, forgejo.url/token, or
-	// tag — those require a daemon restart.
+	// new config changes provider routing/config, labels, Forgejo, database,
+	// or tag — those require a daemon restart.
 	ReloadConfig(context.Context, *connect.Request[v1.ReloadConfigRequest]) (*connect.Response[v1.ReloadConfigResponse], error)
 	// ExecOnWorker runs a single shell command on the worker identified by
 	// instance_id, returning stdout/stderr/exit code. Uses the orchestrator's
@@ -168,6 +175,11 @@ type ControlServiceClient interface {
 	// `internal/provider/<name>/README.md`. Useful for capacity-full incidents
 	// (FJB-11), account-state checks, and confirming managed-resource IDs.
 	ProviderInfo(context.Context, *connect.Request[v1.ProviderInfoRequest]) (*connect.Response[v1.ProviderInfoResponse], error)
+	// JobHistory reads durable, newest-first CI job history from SQLite.
+	JobHistory(context.Context, *connect.Request[v1.JobHistoryRequest]) (*connect.Response[v1.JobHistoryResponse], error)
+	// Statistics aggregates durable job timing, outcomes, and fixed-point cost
+	// estimates without combining different currencies.
+	Statistics(context.Context, *connect.Request[v1.StatisticsRequest]) (*connect.Response[v1.StatisticsResponse], error)
 }
 
 // NewControlServiceClient constructs a client for the fjbellows.control.v1.ControlService service.
@@ -265,6 +277,18 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(controlServiceMethods.ByName("ProviderInfo")),
 			connect.WithClientOptions(opts...),
 		),
+		jobHistory: connect.NewClient[v1.JobHistoryRequest, v1.JobHistoryResponse](
+			httpClient,
+			baseURL+ControlServiceJobHistoryProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("JobHistory")),
+			connect.WithClientOptions(opts...),
+		),
+		statistics: connect.NewClient[v1.StatisticsRequest, v1.StatisticsResponse](
+			httpClient,
+			baseURL+ControlServiceStatisticsProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("Statistics")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -284,6 +308,8 @@ type controlServiceClient struct {
 	execOnWorker   *connect.Client[v1.ExecOnWorkerRequest, v1.ExecOnWorkerResponse]
 	streamLogs     *connect.Client[v1.StreamLogsRequest, v1.StreamLogsResponse]
 	providerInfo   *connect.Client[v1.ProviderInfoRequest, v1.ProviderInfoResponse]
+	jobHistory     *connect.Client[v1.JobHistoryRequest, v1.JobHistoryResponse]
+	statistics     *connect.Client[v1.StatisticsRequest, v1.StatisticsResponse]
 }
 
 // Health calls fjbellows.control.v1.ControlService.Health.
@@ -356,6 +382,16 @@ func (c *controlServiceClient) ProviderInfo(ctx context.Context, req *connect.Re
 	return c.providerInfo.CallUnary(ctx, req)
 }
 
+// JobHistory calls fjbellows.control.v1.ControlService.JobHistory.
+func (c *controlServiceClient) JobHistory(ctx context.Context, req *connect.Request[v1.JobHistoryRequest]) (*connect.Response[v1.JobHistoryResponse], error) {
+	return c.jobHistory.CallUnary(ctx, req)
+}
+
+// Statistics calls fjbellows.control.v1.ControlService.Statistics.
+func (c *controlServiceClient) Statistics(ctx context.Context, req *connect.Request[v1.StatisticsRequest]) (*connect.Response[v1.StatisticsResponse], error) {
+	return c.statistics.CallUnary(ctx, req)
+}
+
 // ControlServiceHandler is an implementation of the fjbellows.control.v1.ControlService service.
 type ControlServiceHandler interface {
 	// Health returns a readiness snapshot: is the reconcile loop ticking,
@@ -396,7 +432,8 @@ type ControlServiceHandler interface {
 	// StreamEvents emits state-transition events as they happen:
 	// worker_provisioned, worker_ready, worker_busy, worker_idle,
 	// worker_reaped, worker_adopted, worker_dropped, job_dispatched,
-	// job_complete, zombie_reaped, reconcile_tick. The stream stays open
+	// job_complete, zombie_reaped, reconcile_tick, route_decided, and
+	// route_deferred. The stream stays open
 	// until the client disconnects or the daemon shuts down. Slow clients
 	// are dropped (channel closed) rather than blocking the producer.
 	//
@@ -419,10 +456,10 @@ type ControlServiceHandler interface {
 	// parsed config.yaml as the operator intended.
 	GetConfig(context.Context, *connect.Request[v1.GetConfigRequest]) (*connect.Response[v1.GetConfigResponse], error)
 	// ReloadConfig re-reads config.yaml from disk and hot-swaps the
-	// hot-reloadable subset (poll intervals, scale.max, labels, drain
+	// hot-reloadable subset (poll interval, capacity/timers, and drain
 	// settings). Returns CodeFailedPrecondition with a clear error if the
-	// new config changes provider, provider_config, forgejo.url/token, or
-	// tag — those require a daemon restart.
+	// new config changes provider routing/config, labels, Forgejo, database,
+	// or tag — those require a daemon restart.
 	ReloadConfig(context.Context, *connect.Request[v1.ReloadConfigRequest]) (*connect.Response[v1.ReloadConfigResponse], error)
 	// ExecOnWorker runs a single shell command on the worker identified by
 	// instance_id, returning stdout/stderr/exit code. Uses the orchestrator's
@@ -451,6 +488,11 @@ type ControlServiceHandler interface {
 	// `internal/provider/<name>/README.md`. Useful for capacity-full incidents
 	// (FJB-11), account-state checks, and confirming managed-resource IDs.
 	ProviderInfo(context.Context, *connect.Request[v1.ProviderInfoRequest]) (*connect.Response[v1.ProviderInfoResponse], error)
+	// JobHistory reads durable, newest-first CI job history from SQLite.
+	JobHistory(context.Context, *connect.Request[v1.JobHistoryRequest]) (*connect.Response[v1.JobHistoryResponse], error)
+	// Statistics aggregates durable job timing, outcomes, and fixed-point cost
+	// estimates without combining different currencies.
+	Statistics(context.Context, *connect.Request[v1.StatisticsRequest]) (*connect.Response[v1.StatisticsResponse], error)
 }
 
 // NewControlServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -544,6 +586,18 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 		connect.WithSchema(controlServiceMethods.ByName("ProviderInfo")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlServiceJobHistoryHandler := connect.NewUnaryHandler(
+		ControlServiceJobHistoryProcedure,
+		svc.JobHistory,
+		connect.WithSchema(controlServiceMethods.ByName("JobHistory")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlServiceStatisticsHandler := connect.NewUnaryHandler(
+		ControlServiceStatisticsProcedure,
+		svc.Statistics,
+		connect.WithSchema(controlServiceMethods.ByName("Statistics")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/fjbellows.control.v1.ControlService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlServiceHealthProcedure:
@@ -574,6 +628,10 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 			controlServiceStreamLogsHandler.ServeHTTP(w, r)
 		case ControlServiceProviderInfoProcedure:
 			controlServiceProviderInfoHandler.ServeHTTP(w, r)
+		case ControlServiceJobHistoryProcedure:
+			controlServiceJobHistoryHandler.ServeHTTP(w, r)
+		case ControlServiceStatisticsProcedure:
+			controlServiceStatisticsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -637,4 +695,12 @@ func (UnimplementedControlServiceHandler) StreamLogs(context.Context, *connect.R
 
 func (UnimplementedControlServiceHandler) ProviderInfo(context.Context, *connect.Request[v1.ProviderInfoRequest]) (*connect.Response[v1.ProviderInfoResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.ProviderInfo is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) JobHistory(context.Context, *connect.Request[v1.JobHistoryRequest]) (*connect.Response[v1.JobHistoryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.JobHistory is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) Statistics(context.Context, *connect.Request[v1.StatisticsRequest]) (*connect.Response[v1.StatisticsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("fjbellows.control.v1.ControlService.Statistics is not implemented"))
 }

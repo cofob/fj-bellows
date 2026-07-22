@@ -21,6 +21,8 @@ func cmdWorkers(args []string, stdout, stderr io.Writer) int {
 	var cf commonFlags
 	registerCommonFlags(fs, &cf)
 	watch := fs.Bool("watch", false, "redraw the worker table on every state-transition event")
+	tier := fs.String("tier", "", "only workers in this tier")
+	provider := fs.String("provider", "", "only workers using this named provider")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -31,12 +33,12 @@ func cmdWorkers(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if *watch {
-		return runWatchWorkers(client, cf, stdout, stderr)
+		return runWatchWorkers(client, cf, *tier, *provider, stdout, stderr)
 	}
 
 	ctx, cancel := contextWithTimeout()
 	defer cancel()
-	resp, err := client.ListWorkers(ctx, connect.NewRequest(&controlv1.ListWorkersRequest{}))
+	resp, err := client.ListWorkers(ctx, connect.NewRequest(&controlv1.ListWorkersRequest{Tier: *tier, Provider: *provider}))
 	if err != nil {
 		return fmtErr(stderr, err)
 	}
@@ -53,12 +55,12 @@ func cmdWorkers(args []string, stdout, stderr io.Writer) int {
 func runWatchWorkers(client interface {
 	ListWorkers(context.Context, *connect.Request[controlv1.ListWorkersRequest]) (*connect.Response[controlv1.ListWorkersResponse], error)
 	StreamEvents(context.Context, *connect.Request[controlv1.StreamEventsRequest]) (*connect.ServerStreamForClient[controlv1.StreamEventsResponse], error)
-}, cf commonFlags, stdout, stderr io.Writer,
+}, cf commonFlags, tier, provider string, stdout, stderr io.Writer,
 ) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	stream, err := client.StreamEvents(ctx, connect.NewRequest(&controlv1.StreamEventsRequest{}))
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(&controlv1.StreamEventsRequest{Tier: tier, Provider: provider}))
 	if err != nil {
 		return fmtErr(stderr, err)
 	}
@@ -72,7 +74,7 @@ func runWatchWorkers(client interface {
 		}
 		return 0
 	}
-	if err := redrawWorkers(ctx, client, stdout, cf.json, stderr); err != nil {
+	if err := redrawWorkers(ctx, client, tier, provider, stdout, cf.json, stderr); err != nil {
 		return fmtErr(stderr, err)
 	}
 
@@ -80,7 +82,7 @@ func runWatchWorkers(client interface {
 		if !redrawingEvent(stream.Msg().Type) {
 			continue
 		}
-		if err := redrawWorkers(ctx, client, stdout, cf.json, stderr); err != nil {
+		if err := redrawWorkers(ctx, client, tier, provider, stdout, cf.json, stderr); err != nil {
 			return fmtErr(stderr, err)
 		}
 	}
@@ -105,11 +107,11 @@ func redrawingEvent(typ string) bool {
 // line so a downstream `jq -c` pipeline can consume the stream.
 func redrawWorkers(ctx context.Context, client interface {
 	ListWorkers(context.Context, *connect.Request[controlv1.ListWorkersRequest]) (*connect.Response[controlv1.ListWorkersResponse], error)
-}, stdout io.Writer, asJSON bool, stderr io.Writer,
+}, tier, provider string, stdout io.Writer, asJSON bool, stderr io.Writer,
 ) error {
 	rpcCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	resp, err := client.ListWorkers(rpcCtx, connect.NewRequest(&controlv1.ListWorkersRequest{}))
+	resp, err := client.ListWorkers(rpcCtx, connect.NewRequest(&controlv1.ListWorkersRequest{Tier: tier, Provider: provider}))
 	if err != nil {
 		return err
 	}
@@ -131,9 +133,11 @@ func redrawWorkers(ctx context.Context, client interface {
 // render "-" when the policy doesn't make them meaningful.
 func renderWorkers(w io.Writer, workers []*controlv1.Worker) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	outln(tw, "INSTANCE\tSTATE\tIP\tVPC_IP\tAGE\tLAST_BUSY\tJOB\tBILLING\tREAP_AT")
+	outln(tw, "TIER\tPROVIDER\tINSTANCE\tSTATE\tIP\tVPC_IP\tAGE\tLAST_BUSY\tJOB\tBILLING\tREAP_AT")
 	for _, wk := range workers {
-		outf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		outf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			emptyDash(wk.Tier),
+			emptyDash(wk.Provider),
 			wk.InstanceId,
 			wk.State,
 			emptyDash(wk.Ip),
